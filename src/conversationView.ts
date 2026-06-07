@@ -239,9 +239,8 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
         command: 'applyResult',
         rid,
         ok: failed.length === 0,
-        text:
-          `Applied: ${applied.length ? applied.join(', ') : 'none'}` +
-          (failed.length ? ` · Failed: ${failed.join(', ')}` : ''),
+        applied,
+        failed,
       });
     } catch (err) {
       vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
@@ -325,6 +324,17 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
 
   .error { color: var(--vscode-errorForeground); font-size: 12px; margin: 6px 0; }
   .ok { color: #2da44e; font-size: 12px; margin: 6px 0; }
+
+  /* applied files list */
+  .apply-result { margin: 8px 0; }
+  .apply-header { color: #2da44e; font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+  .apply-header.failed { color: var(--vscode-errorForeground); }
+  .applied-row { display: flex; align-items: center; gap: 6px; color: var(--vscode-foreground); font-size: 12px; font-family: var(--vscode-editor-font-family); padding: 2px 0; }
+  .applied-row .spacer { flex: 1; }
+
+  /* stop button (left of Send) */
+  .stop-btn { background: var(--danger); color: #fff; border-radius: 4px; padding: 5px 9px; display: inline-flex; align-items: center; }
+  .stop-btn:hover { background: #f85149; }
   blockquote { border-left: 3px solid var(--border); margin: 4px 0; padding-left: 8px; color: var(--vscode-descriptionForeground); }
 
   /* chat box pinned at the bottom */
@@ -344,7 +354,6 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       <div class="actions">
         <button id="btnFix" class="btn-primary" title="Ask Claude to investigate and propose a fix for this comment">⚡ Generate fix</button>
         <button id="btnReply" class="btn-secondary" title="Write a reply to post on GitHub">💬 Reply</button>
-        <button id="btnCancel" class="btn-danger" style="display:none" title="Cancel the running Claude request">Cancel</button>
       </div>
 
       <div id="replyBox">
@@ -362,6 +371,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     <div id="chatSection">
       <textarea id="chatText" rows="3" placeholder="Ask Claude about this conversation… (Enter to send, Shift+Enter for newline)"></textarea>
       <div class="row">
+        <button id="btnCancel" class="stop-btn" style="display:none" title="Stop the running Claude request"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg></button>
         <button id="btnSend" class="btn-primary" title="Send to Claude">Send</button>
       </div>
     </div>
@@ -481,9 +491,22 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
         break;
       }
       case 'applyResult': {
+        const FILE_SVG = '<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0 1 13.25 16h-9.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0 .25-.25V6h-2.75A1.75 1.75 0 0 1 9 4.25V1.5Zm6.75.062V4.25c0 .138.112.25.25.25h2.688l-.011-.013-2.914-2.914-.013-.011Z"/></svg>';
         const d = document.createElement('div');
-        d.className = msg.ok ? 'ok' : 'error';
-        d.textContent = msg.text;
+        d.className = 'apply-result';
+        let html = '';
+        if (msg.applied && msg.applied.length) {
+          html += '<div class="apply-header">Applied</div>';
+          html += msg.applied.map((f) =>
+            '<div class="applied-row"><span>' + f + '</span><span class="spacer"></span>' +
+            '<button class="icon-btn" data-path="' + f + '" title="Open ' + f + ' in editor">' + FILE_SVG + '</button></div>'
+          ).join('');
+        }
+        if (msg.failed && msg.failed.length) {
+          html += '<div class="apply-header failed">Failed</div>';
+          html += msg.failed.map((f) => '<div class="applied-row"><span>' + f + '</span></div>').join('');
+        }
+        d.innerHTML = html;
         append(d);
         break;
       }

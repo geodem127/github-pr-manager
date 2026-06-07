@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { execFile } from 'child_process';
 import {
   GitHubClient,
   PullRequest,
@@ -303,12 +304,14 @@ export class PrDetailPanel {
             this.launchIcon = ICONS.external;
           }
         }
-        const [repo, detail] = await Promise.all([
+        const [repo, detail, behindBase] = await Promise.all([
           this.client.getRepo(),
           this.client.getPrDetail(pr.number),
+          computeBehindBase(pr.base.ref),
         ]);
         this.repoFull = repo.full;
         this.detail = detail;
+        this.behindBase = behindBase;
         this.panel.webview.html = this.html(pr, detail);
       }
     );
@@ -563,7 +566,10 @@ export class PrDetailPanel {
     </aside>`;
   }
 
-  private mergeBoxHtml(detail: PrDetail): string {
+  /** Commits the local HEAD is behind origin/<base>; null when undeterminable. */
+  private behindBase: number | null = null;
+
+  private mergeBoxHtml(pr: PullRequest, detail: PrDetail): string {
     const approved = detail.reviewers.some((r) => r.state === 'APPROVED');
     const review = detail.changesRequested
       ? row('red', ICONS.fileDiff, 'Changes requested', 'At least one reviewer requested changes.')
@@ -588,28 +594,26 @@ export class PrDetailPanel {
         checks = row('grey', ICONS.dot, 'No checks reported', '');
     }
 
+    // Out-of-date basis: local checked-out branch vs the remote base (origin/<base>).
     let branch: string;
-    switch (detail.mergeableState) {
-      case 'behind':
-        branch = row(
-          'yellow',
-          ICONS.alert,
-          'This branch is out-of-date with the base branch',
-          'Merge the latest changes from the base branch into this branch.',
-          `<button class="btn-primary" data-action="updateBranch" title="Pull the latest changes from the remote branch into your local checkout">Update branch</button>`
-        );
-        break;
-      case 'dirty':
-        branch = row('red', ICONS.blocked, 'This branch has conflicts with the base branch', '');
-        break;
-      case 'blocked':
-        branch = row('red', ICONS.blocked, 'Merging is blocked', 'Required conditions have not been met.');
-        break;
-      case 'clean':
-        branch = row('green', ICONS.check, 'No conflicts with the base branch', '');
-        break;
-      default:
-        branch = row('grey', ICONS.dot, `Branch state: ${escapeHtml(detail.mergeableState)}`, '');
+    if (this.behindBase != null && this.behindBase > 0) {
+      branch = row(
+        'yellow',
+        ICONS.alert,
+        'This branch is out-of-date with the base branch',
+        `Your local branch is ${this.behindBase} commit${this.behindBase > 1 ? 's' : ''} behind origin/${escapeHtml(pr.base.ref)}.`,
+        `<button class="btn-primary" data-action="updateBranch" title="Pull the latest changes from the remote branch into your local checkout">Update branch</button>`
+      );
+    } else if (detail.mergeableState === 'dirty') {
+      branch = row('red', ICONS.blocked, 'This branch has conflicts with the base branch', '');
+    } else if (detail.mergeableState === 'blocked') {
+      branch = row('red', ICONS.blocked, 'Merging is blocked', 'Required conditions have not been met.');
+    } else if (this.behindBase === 0) {
+      branch = row('green', ICONS.check, `Up to date with origin/${escapeHtml(pr.base.ref)}`, '');
+    } else if (detail.mergeableState === 'clean') {
+      branch = row('green', ICONS.check, 'No conflicts with the base branch', '');
+    } else {
+      branch = row('grey', ICONS.dot, `Branch state: ${escapeHtml(detail.mergeableState)}`, '');
     }
 
     return `<div class="merge-box">${review}${checks}${branch}</div>`;
@@ -801,7 +805,7 @@ export class PrDetailPanel {
         ? `<h2 class="section">Review conversations</h2>` +
           reviewThreads.map((t) => this.reviewThreadHtml(t)).join('')
         : '') +
-      this.mergeBoxHtml(detail) +
+      this.mergeBoxHtml(pr, detail) +
       this.addCommentHtml();
 
     return `<!DOCTYPE html>
@@ -1063,6 +1067,27 @@ function lastHunkLine(hunk?: string): string | undefined {
   const last = lines[lines.length - 1];
   if (!last || last.startsWith('@@')) return undefined;
   return last.slice(1);
+}
+
+/** How many commits the local HEAD is behind origin/<base>. Null when undeterminable. */
+function computeBehindBase(baseRef: string): Promise<number | null> {
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!cwd) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    execFile(
+      'git',
+      ['rev-list', '--count', `HEAD..origin/${baseRef}`],
+      { cwd },
+      (err, stdout) => {
+        if (err) {
+          resolve(null);
+          return;
+        }
+        const n = parseInt(stdout.trim(), 10);
+        resolve(Number.isNaN(n) ? null : n);
+      }
+    );
+  });
 }
 
 /** Derive the new-side line number a review comment targets from its diff hunk. */
