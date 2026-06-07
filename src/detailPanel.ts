@@ -514,7 +514,7 @@ export class PrDetailPanel {
       .join('');
 
     return `
-    <div class="thread-card collapsible ${thread.isResolved ? 'resolved' : ''}" data-container="${escapeHtml(thread.id)}">
+    <div class="thread-card collapsible ${thread.isResolved ? 'resolved' : ''}" data-container="${escapeHtml(thread.id)}" data-status="${thread.isResolved ? 'resolved' : 'unresolved'}" data-outdated="${thread.isOutdated ? '1' : '0'}">
       <div class="file-header">
         ${this.collapseBtn()}
         <span class="path">${escapeHtml(thread.title)}</span>
@@ -842,7 +842,18 @@ export class PrDetailPanel {
       </div>` +
       discussionThreads.map((t) => this.discussionHtml(t)).join('') +
       (reviewThreads.length
-        ? `<h2 class="section">Review conversations</h2>` +
+        ? `<div class="section-row">
+             <h2 class="section">Review conversations</h2>
+             <span class="spacer"></span>
+             <label class="filter-label" for="threadFilter">Status</label>
+             <select id="threadFilter" title="Filter conversations by status">
+               <option value="all">All</option>
+               <option value="unresolved">Unresolved</option>
+               <option value="resolved">Resolved</option>
+               <option value="outdated">Outdated</option>
+             </select>
+           </div>
+           <div id="threadFilterEmpty" class="muted small" style="display:none;margin:10px 0">No conversations match this filter.</div>` +
           reviewThreads.map((t) => this.reviewThreadHtml(t)).join('')
         : '') +
       this.mergeBoxHtml(pr, detail) +
@@ -952,6 +963,10 @@ export class PrDetailPanel {
   .rev-ind.grey { color: var(--vscode-descriptionForeground); }
 
   h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-descriptionForeground); margin-top: 28px; }
+  .section-row { display: flex; align-items: flex-end; gap: 8px; }
+  .section-row h2.section { margin-bottom: 0; }
+  .filter-label { font-size: 11px; color: var(--vscode-descriptionForeground); }
+  #threadFilter { background: var(--vscode-dropdown-background, var(--vscode-input-background)); color: var(--vscode-dropdown-foreground, var(--vscode-foreground)); border: 1px solid var(--vscode-dropdown-border, var(--border)); border-radius: 4px; padding: 2px 6px; font-size: 12px; font-family: var(--vscode-font-family); }
 
   .merge-box { border: 1px solid var(--border); border-radius: 8px; margin-top: 24px; overflow: hidden; }
   .merge-row { display: flex; gap: 10px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); }
@@ -1067,6 +1082,30 @@ export class PrDetailPanel {
       vscode.postMessage({ command: 'openExternal', url: link.href });
     }
   });
+
+  // Conversation status filter (All / Unresolved / Resolved / Outdated)
+  const threadFilter = document.getElementById('threadFilter');
+  if (threadFilter) {
+    const applyThreadFilter = (value) => {
+      let visible = 0;
+      document.querySelectorAll('#tab-conversation .thread-card[data-status]').forEach((card) => {
+        const match =
+          value === 'all' ||
+          (value === 'outdated' ? card.dataset.outdated === '1' : card.dataset.status === value);
+        card.style.display = match ? '' : 'none';
+        if (match) visible++;
+      });
+      const empty = document.getElementById('threadFilterEmpty');
+      if (empty) empty.style.display = visible === 0 ? '' : 'none';
+      vscode.setState({ ...(vscode.getState() || {}), threadFilter: value });
+    };
+    threadFilter.addEventListener('change', () => applyThreadFilter(threadFilter.value));
+    const saved = (vscode.getState() || {}).threadFilter;
+    if (saved && saved !== 'all') {
+      threadFilter.value = saved;
+      applyThreadFilter(saved);
+    }
+  }
 
   const btnComment = document.getElementById('btnComment');
   if (btnComment) {
