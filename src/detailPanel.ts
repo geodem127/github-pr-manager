@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { execFile } from 'child_process';
+import { exec, execFile } from 'child_process';
 import {
   GitHubClient,
   PullRequest,
@@ -285,10 +285,10 @@ export class PrDetailPanel {
           location: vscode.ProgressLocation.Notification,
           title: `Updating ${pr.head.ref} from origin/${pr.base.ref}…`,
         },
-        async () => {
-          await execGit(['fetch', 'origin', pr.base.ref]);
-          await execGit(['merge', `origin/${pr.base.ref}`, '--no-edit']);
-        }
+        () =>
+          execShell(
+            `git pull origin $(gh pr view --json baseRefName --jq '.baseRefName') --no-edit`
+          )
       );
       vscode.window.setStatusBarMessage(
         `Merged origin/${pr.base.ref} into ${pr.head.ref}`,
@@ -302,6 +302,10 @@ export class PrDetailPanel {
           `Merge of origin/${pr.base.ref} into ${pr.head.ref} has conflicts — resolve them in the editor, then commit.`
         );
         await this.load(pr);
+      } else if (/gh: command not found|'gh' is not recognized/i.test(message)) {
+        vscode.window.showErrorMessage(
+          'GitHub CLI (gh) is required to update the branch. Install it from https://cli.github.com.'
+        );
       } else {
         vscode.window.showErrorMessage(`Failed to update branch: ${message}`);
       }
@@ -1108,12 +1112,12 @@ function lastHunkLine(hunk?: string): string | undefined {
   return last.slice(1);
 }
 
-/** Runs a git command in the workspace root, resolving with stdout. */
-function execGit(args: string[]): Promise<string> {
+/** Runs a shell command in the workspace root, resolving with stdout. */
+function execShell(command: string): Promise<string> {
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!cwd) return Promise.reject(new Error('No workspace folder open.'));
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd }, (err, stdout, stderr) => {
+    exec(command, { cwd }, (err, stdout, stderr) => {
       if (err) reject(new Error((stderr || stdout || err.message).trim()));
       else resolve(stdout);
     });
