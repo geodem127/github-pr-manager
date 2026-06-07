@@ -1,0 +1,562 @@
+import * as vscode from 'vscode';
+import { GitHubClient, PullRequest, Thread, Comment } from './github';
+import { escapeHtml, renderMarkdown } from './markdown';
+import {
+  runClaude,
+  parseSuggestedEdits,
+  applySuggestedEdits,
+  EDIT_FORMAT_INSTRUCTIONS,
+} from './claude';
+
+interface ChatTurn {
+  role: 'user' | 'claude';
+  text: string;
+}
+
+const FILE_ICON =
+  '<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0 1 13.25 16h-9.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0 .25-.25V6h-2.75A1.75 1.75 0 0 1 9 4.25V1.5Zm6.75.062V4.25c0 .138.112.25.25.25h2.688l-.011-.013-2.914-2.914-.013-.011Z"/></svg>';
+
+export class ConversationViewProvider implements vscode.WebviewViewProvider {
+  public static readonly viewId = 'prManager.conversation';
+
+  private view?: vscode.WebviewView;
+  private pr?: PullRequest;
+  private thread?: Thread;
+  private chat: ChatTurn[] = [];
+  private responses = new Map<string, string>();
+  private busy = false;
+  private cancelSource?: vscode.CancellationTokenSource;
+
+  constructor(private readonly client: GitHubClient) {}
+
+  resolveWebviewView(view: vscode.WebviewView): void {
+    this.view = view;
+    view.webview.options = { enableScripts: true };
+    view.webview.html = this.shellHtml();
+
+    view.webview.onDidReceiveMessage(async (msg) => {
+      switch (msg.command) {
+        case 'ready':
+          this.pushThread();
+          break;
+        case 'generateFix':
+          await this.askClaude(
+            'Investigate the relevant code in this repository and propose a concrete fix that addresses the reviewer comment(s) above. Keep the change minimal and consistent with the existing code style.',
+            'Generate fix'
+          );
+          break;
+        case 'chat':
+          if (typeof msg.text === 'string' && msg.text.trim()) {
+            await this.askClaude(msg.text.trim(), null);
+          }
+          break;
+        case 'reply':
+          if (typeof msg.text === 'string' && msg.text.trim()) {
+            await this.postReply(msg.text.trim());
+          }
+          break;
+        case 'applySuggestion':
+          if (typeof msg.rid === 'string') await this.applyResponse(msg.rid);
+          break;
+        case 'openFile':
+          if (typeof msg.path === 'string') await this.openFile(msg.path);
+          break;
+        case 'cancel':
+          this.cancelSource?.cancel();
+          break;
+        case 'openExternal':
+          if (typeof msg.url === 'string') {
+            vscode.env.openExternal(vscode.Uri.parse(msg.url));
+          }
+          break;
+      }
+    });
+  }
+
+  /** Blank the panel (no conversation selected). */
+  clear(): void {
+    this.pr = undefined;
+    this.thread = undefined;
+    this.chat = [];
+    this.responses.clear();
+    void this.view?.webview.postMessage({ command: 'clear' });
+  }
+
+  showThread(pr: PullRequest, thread: Thread): void {
+    this.pr = pr;
+    this.thread = thread;
+    this.chat = [];
+    this.responses.clear();
+    if (this.view) {
+      this.view.show?.(true);
+      this.pushThread();
+    } else {
+      vscode.commands.executeCommand(`${ConversationViewProvider.viewId}.focus`);
+      setTimeout(() => this.pushThread(), 400);
+    }
+  }
+
+  private async openFile(path: string): Promise<void> {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) return;
+    try {
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(root, path));
+      await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+    } catch {
+      vscode.window.showWarningMessage(`File not found in workspace: ${path}`);
+    }
+  }
+
+  private pushThread(): void {
+    if (!this.view || !this.pr || !this.thread) return;
+    const t = this.thread;
+    const root = t.comments[0];
+    this.view.webview.postMessage({
+      command: 'setThread',
+      title: `[#${this.pr.number}] ${this.pr.title}`,
+      subtitle: t.title,
+      diffHtml:
+        t.kind === 'review' && root?.diff_hunk
+          ? `<pre class="diff"><code>${diffHtml(lastLines(root.diff_hunk, 8))}</code></pre>`
+          : '',
+      comments: t.comments.map((c: Comment) => ({
+        author: '@' + c.user.login,
+        date: new Date(c.created_at).toLocaleString(),
+        html: renderMarkdown(c.body),
+      })),
+    });
+  }
+
+  private threadContext(): string {
+    if (!this.pr || !this.thread) return '';
+    const t = this.thread;
+    const root = t.comments[0];
+    const lines = [
+      `You are assisting with GitHub pull request #${this.pr.number}: "${this.pr.title}"`,
+      `Branch: ${this.pr.head.ref} -> ${this.pr.base.ref}`,
+      this.pr.body ? `PR description:\n${this.pr.body}\n` : '',
+      `--- Conversation thread (${t.title}) ---`,
+    ];
+    if (t.kind === 'review' && root?.path) {
+      lines.push(`File: ${root.path}${root.line != null ? ` (line ${root.line})` : ''}`);
+      if (root.diff_hunk) lines.push(`Diff context:\n${root.diff_hunk}`);
+    }
+    for (const c of t.comments) {
+      lines.push(`@${c.user.login} (${c.created_at}):\n${c.body}\n`);
+    }
+    return lines.filter(Boolean).join('\n');
+  }
+
+  private async askClaude(userMessage: string, statusLabel: string | null): Promise<void> {
+    if (!this.view) return;
+    if (!this.thread) {
+      vscode.window.showWarningMessage('Select a conversation from a pull request first.');
+      return;
+    }
+    if (this.busy) {
+      vscode.window.showWarningMessage('Claude is already working — wait or cancel first.');
+      return;
+    }
+
+    this.busy = true;
+    this.cancelSource = new vscode.CancellationTokenSource();
+    const webview = this.view.webview;
+    webview.postMessage({ command: 'claudeStart', label: statusLabel ?? userMessage });
+
+    const transcript = this.chat
+      .map((turn) => `${turn.role === 'user' ? 'User' : 'Claude'}: ${turn.text}`)
+      .join('\n\n');
+
+    const prompt = [
+      this.threadContext(),
+      transcript ? `--- Previous conversation with the user ---\n${transcript}` : '',
+      `--- Request ---\n${userMessage}`,
+      EDIT_FORMAT_INSTRUCTIONS,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+    try {
+      const result = await runClaude(
+        prompt,
+        (e) => webview.postMessage({ command: 'claudeEvent', kind: e.type, text: e.text }),
+        this.cancelSource.token
+      );
+      this.chat.push({ role: 'user', text: userMessage });
+      this.chat.push({ role: 'claude', text: result });
+      const rid = `r${this.responses.size}`;
+      this.responses.set(rid, result);
+      const edits = parseSuggestedEdits(result);
+      webview.postMessage({
+        command: 'claudeDone',
+        rid,
+        html: renderMarkdown(stripEditBlocks(result)),
+        editsHtml: edits.length
+          ? edits
+              .map(
+                (e) =>
+                  `<div class="edit-block">` +
+                  `<div class="edit-file"><span class="edit-path" title="${escapeHtml(e.file)}">${escapeHtml(e.file)}</span>` +
+                  `<span class="spacer"></span>` +
+                  `<button class="icon-btn" data-path="${escapeHtml(e.file)}" title="Open ${escapeHtml(e.file)} in editor">${FILE_ICON}</button></div>` +
+                  (e.search
+                    ? `<pre class="edit-old"><code>${escapeHtml(e.search)}</code></pre>`
+                    : '<div class="muted small" style="padding:4px 8px">new file</div>') +
+                  `<pre class="edit-new"><code>${escapeHtml(e.replace)}</code></pre>` +
+                  `</div>`
+              )
+              .join('')
+          : '',
+        canApply: edits.length > 0,
+      });
+    } catch (err) {
+      webview.postMessage({
+        command: 'claudeError',
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      this.busy = false;
+      this.cancelSource = undefined;
+    }
+  }
+
+  private async applyResponse(rid: string): Promise<void> {
+    const raw = this.responses.get(rid) ?? '';
+    const edits = parseSuggestedEdits(raw);
+    if (edits.length === 0) {
+      vscode.window.showInformationMessage('No applicable code suggestions in this response.');
+      return;
+    }
+    try {
+      const { applied, failed } = await applySuggestedEdits(edits);
+      if (applied.length) {
+        vscode.window.showInformationMessage(`Applied changes to: ${applied.join(', ')}`);
+      }
+      if (failed.length) {
+        vscode.window.showWarningMessage(`Could not apply: ${failed.join(', ')}`);
+      }
+      this.view?.webview.postMessage({
+        command: 'applyResult',
+        rid,
+        ok: failed.length === 0,
+        text:
+          `Applied: ${applied.length ? applied.join(', ') : 'none'}` +
+          (failed.length ? ` · Failed: ${failed.join(', ')}` : ''),
+      });
+    } catch (err) {
+      vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  private async postReply(text: string): Promise<void> {
+    if (!this.pr || !this.thread || !this.view) return;
+    try {
+      const comment = await this.client.reply(this.pr.number, this.thread, text);
+      this.thread.comments.push(comment);
+      this.pushThread();
+      this.view.webview.postMessage({ command: 'replyPosted' });
+      vscode.window.showInformationMessage(`Reply posted to PR #${this.pr.number}.`);
+    } catch (err) {
+      vscode.window.showErrorMessage(
+        `Failed to post reply: ${err instanceof Error ? err.message : err}`
+      );
+    }
+  }
+
+  private shellHtml(): string {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src https: data:;">
+<style>
+  :root { --border: var(--vscode-panel-border); --header-bg: var(--vscode-sideBar-background); --add-bg: #2da44e1f; --del-bg: #cf222e1f; --success: #238636; --danger: #da3633; }
+  html, body { height: 100%; margin: 0; padding: 0; }
+  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); font-size: 13px; display: flex; flex-direction: column; overflow: hidden; }
+  button { border: none; border-radius: 4px; padding: 5px 12px; cursor: pointer; font-size: 12px; }
+  .btn-primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .btn-primary:hover { background: var(--vscode-button-hoverBackground); }
+  .btn-secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  .btn-success { background: var(--success); color: #fff; font-weight: 600; }
+  .btn-success:hover:not(:disabled) { background: #2ea043; }
+  .btn-danger { background: var(--danger); color: #fff; font-weight: 600; }
+  .btn-danger:hover:not(:disabled) { background: #f85149; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .icon-btn { background: none; color: var(--vscode-descriptionForeground); padding: 2px; display: inline-flex; align-items: center; border-radius: 4px; }
+  .icon-btn:hover { background: var(--vscode-toolbar-hoverBackground); color: var(--vscode-foreground); }
+  textarea { width: 100%; box-sizing: border-box; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; padding: 6px; font-family: var(--vscode-font-family); resize: vertical; }
+  .muted { color: var(--vscode-descriptionForeground); }
+  .small { font-size: 11px; }
+  .spacer { flex: 1; }
+
+  #empty { margin-top: 24px; text-align: center; padding: 0 12px; }
+  #content { display: none; flex: 1; min-height: 0; flex-direction: column; }
+  #scrollArea { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px 4px; }
+
+  #title { font-weight: 600; margin-bottom: 2px; }
+  #subtitle { font-family: var(--vscode-editor-font-family); font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 8px; }
+  .comment { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin: 6px 0; }
+  .comment-meta { font-size: 11px; margin-bottom: 4px; display: flex; gap: 8px; }
+  pre { background: var(--vscode-textCodeBlock-background); padding: 8px; border-radius: 5px; overflow-x: auto; font-size: 11px; border: 1px solid var(--border); margin: 6px 0; }
+  code { font-family: var(--vscode-editor-font-family); }
+  .comment code, .claude-response code { background: var(--vscode-textCodeBlock-background); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; font-size: 11px; }
+  .comment pre code, .claude-response pre code { border: none; background: none; padding: 0; }
+  pre.diff { border-left: 3px solid var(--vscode-charts-blue); }
+  .line-add { display: block; background: var(--add-bg); }
+  .line-del { display: block; background: var(--del-bg); }
+  .line-hunk { display: block; color: var(--vscode-charts-blue); background: #316dca14; }
+
+  .actions { display: flex; gap: 8px; margin: 10px 0; }
+  #replyBox { display: none; margin-bottom: 10px; }
+  #replyBox.visible { display: block; }
+  .row { display: flex; gap: 8px; margin-top: 6px; justify-content: flex-end; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+  .activity { font-size: 11px; color: var(--vscode-descriptionForeground); margin: 2px 0; }
+  .activity::before { content: '⏳ '; }
+  .claude-response { border: 1px solid var(--border); border-left: 3px solid var(--vscode-charts-purple); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
+  .claude-user { border-left: 3px solid var(--vscode-charts-blue); border-radius: 6px; background: var(--vscode-textCodeBlock-background); padding: 6px 10px; margin: 8px 0; font-size: 12px; }
+
+  /* suggested file changes: rows + uniform diff colors */
+  .edit-block { border: 1px solid var(--border); border-radius: 6px; margin: 8px 0; overflow: hidden; }
+  .edit-file { display: flex; align-items: center; gap: 6px; font-family: var(--vscode-editor-font-family); font-size: 11px; padding: 4px 8px; background: var(--header-bg); border-bottom: 1px solid var(--border); }
+  .edit-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  pre.edit-old { background: var(--del-bg); margin: 0; border: none; border-radius: 0; border-bottom: 1px solid var(--border); }
+  pre.edit-new { background: var(--add-bg); margin: 0; border: none; border-radius: 0; }
+
+  .error { color: var(--vscode-errorForeground); font-size: 12px; margin: 6px 0; }
+  .ok { color: #2da44e; font-size: 12px; margin: 6px 0; }
+  blockquote { border-left: 3px solid var(--border); margin: 4px 0; padding-left: 8px; color: var(--vscode-descriptionForeground); }
+
+  /* chat box pinned at the bottom */
+  #chatSection { flex-shrink: 0; border-top: 1px solid var(--border); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); padding: 8px 12px 10px; }
+</style>
+</head>
+<body>
+  <div id="empty" class="muted">Open a pull request and choose a conversation to view it here.</div>
+
+  <div id="content">
+    <div id="scrollArea">
+      <div id="title"></div>
+      <div id="subtitle"></div>
+      <div id="diff"></div>
+      <div id="comments"></div>
+
+      <div class="actions">
+        <button id="btnFix" class="btn-primary" title="Ask Claude to investigate and propose a fix for this comment">⚡ Generate fix</button>
+        <button id="btnReply" class="btn-secondary" title="Write a reply to post on GitHub">💬 Reply</button>
+        <button id="btnCancel" class="btn-danger" style="display:none" title="Cancel the running Claude request">Cancel</button>
+      </div>
+
+      <div id="replyBox">
+        <textarea id="replyText" rows="3" placeholder="Write a reply to post on GitHub…"></textarea>
+        <div class="row">
+          <button id="btnPostReply" class="btn-success" title="Post this reply to GitHub">Post reply to GitHub</button>
+        </div>
+      </div>
+
+      <hr>
+      <div class="muted small" style="text-transform:uppercase;letter-spacing:0.04em">Claude</div>
+      <div id="claudeLog"></div>
+    </div>
+
+    <div id="chatSection">
+      <textarea id="chatText" rows="3" placeholder="Ask Claude about this conversation… (Enter to send, Shift+Enter for newline)"></textarea>
+      <div class="row">
+        <button id="btnSend" class="btn-primary" title="Send to Claude">Send</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const vscode = acquireVsCodeApi();
+  const $ = (id) => document.getElementById(id);
+  let busy = false;
+  let activityGroup = null;
+
+  function setBusy(value) {
+    busy = value;
+    ['btnFix', 'btnSend', 'btnPostReply'].forEach((id) => ($(id).disabled = value));
+    $('btnCancel').style.display = value ? '' : 'none';
+  }
+
+  function append(el) {
+    $('claudeLog').appendChild(el);
+    el.scrollIntoView({ block: 'nearest' });
+  }
+
+  window.addEventListener('message', (event) => {
+    const msg = event.data;
+    switch (msg.command) {
+      case 'clear': {
+        $('empty').style.display = '';
+        $('content').style.display = 'none';
+        $('claudeLog').innerHTML = '';
+        $('replyBox').classList.remove('visible');
+        break;
+      }
+      case 'setThread': {
+        $('empty').style.display = 'none';
+        $('content').style.display = 'flex';
+        $('title').textContent = msg.title;
+        $('subtitle').textContent = msg.subtitle;
+        $('diff').innerHTML = msg.diffHtml || '';
+        $('comments').innerHTML = msg.comments
+          .map(
+            (c) =>
+              '<div class="comment"><div class="comment-meta"><strong>' +
+              c.author +
+              '</strong><span class="muted">' +
+              c.date +
+              '</span></div><div>' +
+              c.html +
+              '</div></div>'
+          )
+          .join('');
+        $('claudeLog').innerHTML = '';
+        $('replyBox').classList.remove('visible');
+        break;
+      }
+      case 'claudeStart': {
+        setBusy(true);
+        const u = document.createElement('div');
+        u.className = 'claude-user';
+        u.textContent = msg.label;
+        append(u);
+        activityGroup = document.createElement('div');
+        append(activityGroup);
+        break;
+      }
+      case 'claudeEvent': {
+        if (msg.kind === 'status' && activityGroup) {
+          const d = document.createElement('div');
+          d.className = 'activity';
+          d.textContent = msg.text;
+          activityGroup.appendChild(d);
+          d.scrollIntoView({ block: 'nearest' });
+        }
+        break;
+      }
+      case 'claudeDone': {
+        setBusy(false);
+        if (activityGroup) activityGroup.innerHTML = '';
+        const d = document.createElement('div');
+        d.className = 'claude-response';
+        d.innerHTML = msg.html + (msg.editsHtml || '');
+        if (msg.canApply) {
+          const row = document.createElement('div');
+          row.className = 'row';
+          const discard = document.createElement('button');
+          discard.className = 'btn-danger';
+          discard.textContent = 'Discard';
+          discard.title = 'Discard these suggested changes';
+          const apply = document.createElement('button');
+          apply.className = 'btn-success';
+          apply.textContent = '✓ Apply suggested changes';
+          apply.title = 'Apply these changes to your working tree';
+          apply.dataset.rid = msg.rid;
+          apply.addEventListener('click', () => {
+            apply.disabled = true;
+            apply.textContent = 'Applied';
+            discard.disabled = true;
+            vscode.postMessage({ command: 'applySuggestion', rid: msg.rid });
+          });
+          discard.addEventListener('click', () => {
+            discard.disabled = true;
+            apply.disabled = true;
+            discard.textContent = 'Discarded';
+          });
+          row.appendChild(discard);
+          row.appendChild(apply);
+          d.appendChild(row);
+        }
+        append(d);
+        break;
+      }
+      case 'claudeError': {
+        setBusy(false);
+        const d = document.createElement('div');
+        d.className = 'error';
+        d.textContent = msg.text;
+        append(d);
+        break;
+      }
+      case 'applyResult': {
+        const d = document.createElement('div');
+        d.className = msg.ok ? 'ok' : 'error';
+        d.textContent = msg.text;
+        append(d);
+        break;
+      }
+      case 'replyPosted': {
+        $('replyText').value = '';
+        $('replyBox').classList.remove('visible');
+        break;
+      }
+    }
+  });
+
+  $('btnFix').addEventListener('click', () => {
+    if (!busy) vscode.postMessage({ command: 'generateFix' });
+  });
+  $('btnReply').addEventListener('click', () => $('replyBox').classList.toggle('visible'));
+  $('btnPostReply').addEventListener('click', () => {
+    const text = $('replyText').value;
+    if (text.trim()) vscode.postMessage({ command: 'reply', text });
+  });
+  $('btnCancel').addEventListener('click', () => vscode.postMessage({ command: 'cancel' }));
+
+  function sendChat() {
+    const text = $('chatText').value;
+    if (!text.trim() || busy) return;
+    $('chatText').value = '';
+    vscode.postMessage({ command: 'chat', text });
+  }
+  $('btnSend').addEventListener('click', sendChat);
+  $('chatText').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChat();
+    }
+  });
+
+  document.addEventListener('click', (e) => {
+    const fileBtn = e.target.closest('[data-path]');
+    if (fileBtn) {
+      vscode.postMessage({ command: 'openFile', path: fileBtn.dataset.path });
+      return;
+    }
+    const link = e.target.closest('a[href]');
+    if (link) {
+      e.preventDefault();
+      vscode.postMessage({ command: 'openExternal', url: link.href });
+    }
+  });
+
+  vscode.postMessage({ command: 'ready' });
+</script>
+</body>
+</html>`;
+  }
+}
+
+function lastLines(text: string, n: number): string {
+  const lines = text.split('\n');
+  return lines.slice(Math.max(0, lines.length - n)).join('\n');
+}
+
+function diffHtml(hunk: string): string {
+  return hunk
+    .split('\n')
+    .map((line) => {
+      const esc = escapeHtml(line);
+      if (line.startsWith('+')) return `<span class="line-add">${esc}</span>`;
+      if (line.startsWith('-')) return `<span class="line-del">${esc}</span>`;
+      if (line.startsWith('@@')) return `<span class="line-hunk">${esc}</span>`;
+      return `<span>${esc}</span>`;
+    })
+    .join('\n');
+}
+
+function stripEditBlocks(text: string): string {
+  return text.replace(/<<<FILE:[\s\S]*?>>>END/g, '*(code change shown below)*').trim();
+}

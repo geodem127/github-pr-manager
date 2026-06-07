@@ -1,0 +1,122 @@
+{
+  "name": "github-pr-manager",
+  "displayName": "GitHub PR Manager",
+  "description": "Manage GitHub pull requests for the open repo, with Claude-powered fixes and replies.",
+  "version": "0.1.0",
+  "publisher": "geodem",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "icon": "media/github-ticket-manager-icon.png",
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "prManager",
+          "title": "GitHub PR Manager",
+          "icon": "media/activity-icon.svg"
+        }
+      ],
+      "panel": []
+    },
+    "views": {
+      "prManager": [
+        {
+          "id": "prManager.prList",
+          "type": "webview",
+          "name": "Pull Requests",
+          "icon": "media/pr-icon.svg"
+        },
+        {
+          "id": "prManager.conversation",
+          "type": "webview",
+          "name": "Conversation & Claude",
+          "icon": "media/pr-icon.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "prManager.refresh",
+        "title": "Refresh Pull Requests",
+        "icon": "$(refresh)",
+        "category": "PR Manager"
+      },
+      {
+        "command": "prManager.filter",
+        "title": "Filter Pull Requests",
+        "icon": "$(filter)",
+        "category": "PR Manager"
+      },
+      {
+        "command": "prManager.sort",
+        "title": "Sort Pull Requests",
+        "icon": "$(sort-precedence)",
+        "category": "PR Manager"
+      },
+      {
+        "command": "prManager.openPr",
+        "title": "Open Pull Request",
+        "category": "PR Manager"
+      },
+      {
+        "command": "prManager.openConversation",
+        "title": "Open Conversation in Right Panel",
+        "category": "PR Manager"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "prManager.filter",
+          "when": "view == prManager.prList",
+          "group": "navigation@1"
+        },
+        {
+          "command": "prManager.sort",
+          "when": "view == prManager.prList",
+          "group": "navigation@2"
+        },
+        {
+          "command": "prManager.refresh",
+          "when": "view == prManager.prList",
+          "group": "navigation@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "GitHub PR Manager",
+      "properties": {
+        "prManager.claudeCliPath": {
+          "type": "string",
+          "default": "claude",
+          "description": "Path to the Claude Code CLI executable."
+        },
+        "prManager.claudeModel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model override passed to the Claude CLI (--model)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.4.0"
+  }
+}

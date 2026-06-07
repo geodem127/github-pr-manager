@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <!-- ticket outline with side notches -->
+  <path d="M3 7 H21 V10 A2 2 0 0 0 21 14 V17 H3 V14 A2 2 0 0 0 3 10 Z"/>
+  <!-- pull-request rail: two nodes joined, arrow into the right node -->
+  <circle cx="8" cy="12" r="1.6"/>
+  <circle cx="16" cy="12" r="1.6"/>
+  <path d="M9.6 12 H14.4"/>
+  <path d="M12.6 10.4 L14.4 12 L12.6 13.6"/>
+</svg>
