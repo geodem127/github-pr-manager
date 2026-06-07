@@ -258,8 +258,10 @@ export class PrDetailPanel {
     }
   }
 
+  /** Fetches the latest base branch and merges it into the PR branch. */
   private async updateBranch(): Promise<void> {
     if (!this.pr) return;
+    const pr = this.pr;
     const gitExt = vscode.extensions.getExtension('vscode.git');
     const git = gitExt?.isActive ? gitExt.exports.getAPI(1) : (await gitExt?.activate())?.getAPI(1);
     const repo = git?.repositories[0];
@@ -269,25 +271,40 @@ export class PrDetailPanel {
     }
     const head: string | undefined = repo.state.HEAD?.name;
     try {
-      if (head !== this.pr.head.ref) {
+      if (head !== pr.head.ref) {
         const pick = await vscode.window.showWarningMessage(
-          `You are on "${head}", but this PR's branch is "${this.pr.head.ref}".`,
-          'Checkout & Pull',
+          `You are on "${head}", but this PR's branch is "${pr.head.ref}".`,
+          'Checkout & Update',
           'Cancel'
         );
-        if (pick !== 'Checkout & Pull') return;
-        await repo.checkout(this.pr.head.ref);
+        if (pick !== 'Checkout & Update') return;
+        await repo.checkout(pr.head.ref);
       }
       await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: 'Pulling latest changes…' },
-        () => repo.pull()
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `Updating ${pr.head.ref} from origin/${pr.base.ref}…`,
+        },
+        async () => {
+          await execGit(['fetch', 'origin', pr.base.ref]);
+          await execGit(['merge', `origin/${pr.base.ref}`, '--no-edit']);
+        }
       );
-      vscode.window.setStatusBarMessage('Branch updated', 3000);
-      await this.load(this.pr);
+      vscode.window.setStatusBarMessage(
+        `Merged origin/${pr.base.ref} into ${pr.head.ref}`,
+        4000
+      );
+      await this.load(pr);
     } catch (err) {
-      vscode.window.showErrorMessage(
-        `Failed to update branch: ${err instanceof Error ? err.message : err}`
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      if (/CONFLICT|Automatic merge failed/i.test(message)) {
+        vscode.window.showWarningMessage(
+          `Merge of origin/${pr.base.ref} into ${pr.head.ref} has conflicts — resolve them in the editor, then commit.`
+        );
+        await this.load(pr);
+      } else {
+        vscode.window.showErrorMessage(`Failed to update branch: ${message}`);
+      }
     }
   }
 
@@ -620,7 +637,7 @@ export class PrDetailPanel {
         `Your local branch is ${this.behindBase} commit${this.behindBase > 1 ? 's' : ''} behind origin/${escapeHtml(pr.base.ref)}.` +
           (this.canUpdateBranch ? '' : ' Check out the PR branch locally to enable updating.'),
         this.canUpdateBranch
-          ? `<button class="btn-primary" data-action="updateBranch" title="Pull the latest changes from the remote branch into your local checkout">Update branch</button>`
+          ? `<button class="btn-primary" data-action="updateBranch" title="Fetch the latest base branch and merge it into the PR branch">Update branch</button>`
           : ''
       );
     } else if (detail.mergeableState === 'dirty') {
@@ -1089,6 +1106,18 @@ function lastHunkLine(hunk?: string): string | undefined {
   const last = lines[lines.length - 1];
   if (!last || last.startsWith('@@')) return undefined;
   return last.slice(1);
+}
+
+/** Runs a git command in the workspace root, resolving with stdout. */
+function execGit(args: string[]): Promise<string> {
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!cwd) return Promise.reject(new Error('No workspace folder open.'));
+  return new Promise((resolve, reject) => {
+    execFile('git', args, { cwd }, (err, stdout, stderr) => {
+      if (err) reject(new Error((stderr || stdout || err.message).trim()));
+      else resolve(stdout);
+    });
+  });
 }
 
 /** How many commits the local HEAD is behind origin/<base>. Null when undeterminable. */
