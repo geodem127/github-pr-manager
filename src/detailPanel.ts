@@ -60,13 +60,6 @@ export class PrDetailPanel {
   private repoFull = '';
   private launchIcon = '';
   private suggestions = new Map<string, Suggestion>();
-  private canUpdateBranch = false;
-
-  /** Refresh the currently open detail panel (e.g. after a reply from the right panel). */
-  static refreshCurrent(): void {
-    const p = PrDetailPanel.current;
-    if (p?.pr) void p.load(p.pr);
-  }
 
   static async show(
     extensionUri: vscode.Uri,
@@ -316,15 +309,6 @@ export class PrDetailPanel {
         ]);
         this.repoFull = repo.full;
         this.detail = detail;
-        // Update-branch is only offered when the PR branch is checked out locally.
-        this.canUpdateBranch = false;
-        try {
-          const gitExt = vscode.extensions.getExtension('vscode.git');
-          const git = gitExt?.isActive ? gitExt.exports.getAPI(1) : undefined;
-          this.canUpdateBranch = git?.repositories[0]?.state.HEAD?.name === pr.head.ref;
-        } catch {
-          // git extension unavailable — keep the button hidden
-        }
         this.panel.webview.html = this.html(pr, detail);
       }
     );
@@ -611,12 +595,8 @@ export class PrDetailPanel {
           'yellow',
           ICONS.alert,
           'This branch is out-of-date with the base branch',
-          this.canUpdateBranch
-            ? 'Merge the latest changes from the base branch into this branch.'
-            : 'Check out the PR branch locally to enable updating.',
-          this.canUpdateBranch
-            ? `<button class="btn-primary" data-action="updateBranch" title="Pull the latest changes from the remote branch into your local checkout">Update branch</button>`
-            : ''
+          'Merge the latest changes from the base branch into this branch.',
+          `<button class="btn-primary" data-action="updateBranch" title="Pull the latest changes from the remote branch into your local checkout">Update branch</button>`
         );
         break;
       case 'dirty':
@@ -848,8 +828,7 @@ export class PrDetailPanel {
   .chip-yellow { background: #bf870022; color: #d4a72c; border: 1px solid #bf870066; }
   .chip-grey { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
 
-  .tabs { display: flex; gap: 4px; align-items: center; border-bottom: 1px solid var(--border); margin: 14px 0 18px; position: sticky; top: 0; background: var(--vscode-editor-background); z-index: 5; }
-  .tab-refresh { margin-right: 4px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 14px 0 18px; position: sticky; top: 0; background: var(--vscode-editor-background); z-index: 5; }
   .tab { background: none; border: none; border-bottom: 2px solid transparent; color: var(--vscode-foreground); padding: 8px 14px; cursor: pointer; font-size: 13px; }
   .tab.active { border-bottom-color: var(--vscode-focusBorder); font-weight: 600; }
   .tab .count { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-radius: 999px; padding: 0 7px; font-size: 11px; margin-left: 4px; }
@@ -978,8 +957,6 @@ export class PrDetailPanel {
   <div class="tabs">
     <button class="tab active" data-tab="conversation">Conversation<span class="count">${detail.threads.reduce((n, t) => n + t.comments.length, 0)}</span></button>
     <button class="tab" data-tab="files">Files Changed<span class="count">${detail.files.length}</span></button>
-    <span class="spacer"></span>
-    <button class="icon-btn tab-refresh" data-action="refresh" title="Refresh pull request data">${ICONS.sync}</button>
   </div>
 
   <div id="tab-conversation">

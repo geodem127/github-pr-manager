@@ -27,10 +27,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
   private busy = false;
   private cancelSource?: vscode.CancellationTokenSource;
 
-  constructor(
-    private readonly client: GitHubClient,
-    private readonly onReplied?: () => void
-  ) {}
+  constructor(private readonly client: GitHubClient) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
@@ -118,8 +115,6 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       command: 'setThread',
       title: `[#${this.pr.number}] ${this.pr.title}`,
       subtitle: t.title,
-      // A generated fix only makes sense for code review threads.
-      canFix: t.kind === 'review' && !!root?.path && !t.isResolved,
       diffHtml:
         t.kind === 'review' && root?.diff_hunk
           ? `<pre class="diff"><code>${diffHtml(lastLines(root.diff_hunk, 8))}</code></pre>`
@@ -261,8 +256,6 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       this.pushThread();
       this.view.webview.postMessage({ command: 'replyPosted' });
       vscode.window.showInformationMessage(`Reply posted to PR #${this.pr.number}.`);
-      // Pull the latest PR data into the center panel.
-      this.onReplied?.();
     } catch (err) {
       vscode.window.showErrorMessage(
         `Failed to post reply: ${err instanceof Error ? err.message : err}`
@@ -349,7 +342,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       <div id="comments"></div>
 
       <div class="actions">
-        <button id="btnFix" class="btn-secondary" style="display:none" title="Ask Claude to investigate and propose a fix for this comment">⚡ Generate fix</button>
+        <button id="btnFix" class="btn-primary" title="Ask Claude to investigate and propose a fix for this comment">⚡ Generate fix</button>
         <button id="btnReply" class="btn-secondary" title="Write a reply to post on GitHub">💬 Reply</button>
         <button id="btnCancel" class="btn-danger" style="display:none" title="Cancel the running Claude request">Cancel</button>
       </div>
@@ -404,7 +397,6 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       case 'setThread': {
         $('empty').style.display = 'none';
         $('content').style.display = 'flex';
-        $('btnFix').style.display = msg.canFix ? '' : 'none';
         $('title').textContent = msg.title;
         $('subtitle').textContent = msg.subtitle;
         $('diff').innerHTML = msg.diffHtml || '';
@@ -463,11 +455,15 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
           apply.title = 'Apply these changes to your working tree';
           apply.dataset.rid = msg.rid;
           apply.addEventListener('click', () => {
+            apply.disabled = true;
+            apply.textContent = 'Applied';
+            discard.disabled = true;
             vscode.postMessage({ command: 'applySuggestion', rid: msg.rid });
-            row.remove();
           });
           discard.addEventListener('click', () => {
-            row.remove();
+            discard.disabled = true;
+            apply.disabled = true;
+            discard.textContent = 'Discarded';
           });
           row.appendChild(discard);
           row.appendChild(apply);
