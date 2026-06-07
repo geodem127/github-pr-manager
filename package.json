@@ -5,6 +5,14 @@
   "version": "0.1.0",
   "publisher": "geodem",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/geodem127/github-pr-manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/geodem127/github-pr-manager/issues"
+  },
+  "homepage": "https://github.com/geodem127/github-pr-manager#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
