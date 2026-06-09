@@ -53,13 +53,52 @@ export class ClaudeCodeBridge {
     }
     const prompt = `Review the attached PR context in @${CONTEXT_FILE} (latest: ${label}) and help me address it.`;
     await this.focusClaudeCode();
+
+    // 1) Try to attach the context file directly (like the "+" button).
+    const attached = await this.attachFileToClaudeCode();
+    // 2) Try to send a prompt that references the file via @-mention.
     const sent = await this.sendToClaudeCode(prompt);
-    if (!sent) {
+
+    if (attached && !sent) {
+      vscode.window.setStatusBarMessage(`Attached ${CONTEXT_FILE} to Claude Code`, 3000);
+    } else if (!attached && !sent) {
       await vscode.env.clipboard.writeText(prompt);
       vscode.window.showInformationMessage(
-        `Context added to @${CONTEXT_FILE}. Prompt copied — paste it into Claude Code (⌘/Ctrl+V).`
+        `Context added to @${CONTEXT_FILE}. Prompt copied — paste it into Claude Code (⌘/Ctrl+V), ` +
+          `or run "PR Manager: Discover Claude Code Commands" to wire direct attach/send.`
       );
     }
+  }
+
+  /** Tries to attach the context file to Claude Code's context (the "+" affordance). */
+  private async attachFileToClaudeCode(): Promise<boolean> {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) return false;
+    const fileUri = vscode.Uri.joinPath(root, CONTEXT_FILE);
+    const configured = vscode.workspace
+      .getConfiguration('prManager')
+      .get<string>('claudeCodeAttachCommand', '');
+    const candidates = configured ? [configured] : [];
+    if (!configured) {
+      const all = await vscode.commands.getCommands(true);
+      candidates.push(
+        ...all.filter(
+          (c) => /claude/i.test(c) && /(attach|addFile|add-file|addContext|add-context|addToContext)/i.test(c)
+        )
+      );
+    }
+    for (const cmd of candidates) {
+      // Try the most likely argument shapes Claude Code might accept.
+      for (const arg of [fileUri, fileUri.fsPath, [fileUri], { uri: fileUri }]) {
+        try {
+          await vscode.commands.executeCommand(cmd, arg);
+          return true;
+        } catch {
+          // try next shape / command
+        }
+      }
+    }
+    return false;
   }
 
   /** Best-effort focus of the official Claude Code view. */
@@ -116,15 +155,23 @@ export class ClaudeCodeBridge {
       );
       return;
     }
+    const role = await vscode.window.showQuickPick(
+      [
+        { label: 'Attach command', detail: 'Adds the context file to Claude Code (the "+" affordance)', key: 'claudeCodeAttachCommand' },
+        { label: 'Send command', detail: 'Sends a prompt into the Claude Code input', key: 'claudeCodeSendCommand' },
+      ],
+      { title: 'Which Claude Code action do you want to wire?' }
+    );
+    if (!role) return;
     const pick = await vscode.window.showQuickPick(claude, {
-      title: 'Claude Code commands (pick one to set as the "send" command)',
-      placeHolder: 'Selecting sets prManager.claudeCodeSendCommand',
+      title: `Pick the command for "${role.label}"`,
+      placeHolder: `Sets prManager.${role.key}`,
     });
     if (pick) {
       await vscode.workspace
         .getConfiguration('prManager')
-        .update('claudeCodeSendCommand', pick, vscode.ConfigurationTarget.Global);
-      vscode.window.showInformationMessage(`Set Claude Code send command to "${pick}".`);
+        .update(role.key, pick, vscode.ConfigurationTarget.Global);
+      vscode.window.showInformationMessage(`Set ${role.label} to "${pick}".`);
     }
   }
 

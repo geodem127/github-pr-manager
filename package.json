@@ -133,10 +133,15 @@
           "default": "claude-code-chat",
           "description": "Where 'Add to Claude context' sends comments/reviews."
         },
+        "prManager.claudeCodeAttachCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Command ID used to attach the context file directly to Claude Code (like its '+' button). Leave empty to auto-detect; run 'PR Manager: Discover Claude Code Commands' to pick one."
+        },
         "prManager.claudeCodeSendCommand": {
           "type": "string",
           "default": "",
-          "description": "Command ID used to send a prompt to the official Claude Code chat. Leave empty to auto-detect; run 'PR Manager: Discover Claude Code Commands' to pick one. If sending isn't possible, the prompt is copied to the clipboard to paste into Claude Code."
+          "description": "Command ID used to send a prompt to the official Claude Code chat. Leave empty to auto-detect; run 'PR Manager: Discover Claude Code Commands' to pick one. If neither attach nor send is possible, the prompt is copied to the clipboard to paste into Claude Code."
         },
         "prManager.instructionsPath": {
           "type": "string",
