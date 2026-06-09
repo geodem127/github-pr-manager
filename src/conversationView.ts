@@ -100,6 +100,11 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
 
   /** Adds a comment/review to the chat's context and reveals the panel. */
   addContext(label: string, content: string): void {
+    if (this.contextItems.some((c) => c.content === content)) {
+      vscode.window.setStatusBarMessage('Already in Claude context', 2000);
+      this.view?.show?.(true);
+      return;
+    }
     this.contextItems.push({ label, content });
     const reveal = () => {
       this.view?.show?.(true);

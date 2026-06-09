@@ -99,7 +99,7 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  const claudeCode = new ClaudeCodeBridge();
+  const claudeCode = new ClaudeCodeBridge(context.extensionUri);
 
   /** Route attached context to whichever chat the user prefers. */
   const addContext = (label: string, contentText: string) => {

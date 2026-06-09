@@ -125,7 +125,12 @@
             "Use the built-in chat panel inside the extension."
           ],
           "default": "claude-code",
-          "description": "Where 'Add to Claude context' sends comments/reviews."
+          "description": "Where 'Add to Claude context' sends comments/reviews: the Claude integrated terminal or the built-in chat panel."
+        },
+        "prManager.instructionsPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a Markdown file with instructions Claude should follow for attached PR context. Absolute or workspace-relative. Leave empty to use the bundled default."
         }
       }
     }

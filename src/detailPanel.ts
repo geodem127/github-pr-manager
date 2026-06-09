@@ -67,9 +67,27 @@ export class PrDetailPanel {
   private pr?: PullRequest;
   private detail?: PrDetail;
   private repoFull = '';
-  private launchIcon = '';
+  private openFileIcon = '';
+  private clawdIcon = '';
   private suggestions = new Map<string, Suggestion>();
   private canUpdateBranch = false;
+
+  /** Loads an SVG from media, normalising it to a 14px currentColor icon. */
+  private async loadIcon(file: string, fallback: string): Promise<string> {
+    try {
+      const bytes = await vscode.workspace.fs.readFile(
+        vscode.Uri.joinPath(this.extensionUri, 'media', file)
+      );
+      return Buffer.from(bytes)
+        .toString('utf8')
+        .replace(/<\?xml[^>]*\?>/, '')
+        .replace(/\s(width|height)="[^"]*"/g, '')
+        .replace('<svg ', '<svg fill="currentColor" width="14" height="14" ')
+        .trim();
+    } catch {
+      return fallback;
+    }
+  }
 
   /** Refresh the currently open detail panel (e.g. after a reply from the right panel). */
   static refreshCurrent(): void {
@@ -343,17 +361,9 @@ export class PrDetailPanel {
     await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: `Loading PR #${pr.number}…` },
       async () => {
-        if (!this.launchIcon) {
-          try {
-            const bytes = await vscode.workspace.fs.readFile(
-              vscode.Uri.joinPath(this.extensionUri, 'media', 'launch-icon.svg')
-            );
-            this.launchIcon = Buffer.from(bytes)
-              .toString('utf8')
-              .replace('<svg ', '<svg fill="currentColor" width="14" height="14" ');
-          } catch {
-            this.launchIcon = ICONS.external;
-          }
+        if (!this.openFileIcon) {
+          this.openFileIcon = await this.loadIcon('open-file.svg', ICONS.file);
+          this.clawdIcon = await this.loadIcon('clawd.svg', ICONS.claudeAdd);
         }
         const [repo, detail, behindBase] = await Promise.all([
           this.client.getRepo(),
@@ -440,7 +450,7 @@ export class PrDetailPanel {
     const commentAttr = commentId != null ? ` data-comment="${commentId}"` : '';
     return (
       `<button class="icon-btn" data-action="copyLink" data-url="${escapeHtml(url)}" title="Copy link to this comment">${ICONS.link}</button>` +
-      `<button class="icon-btn ctx-btn" data-action="addContext" data-thread="${escapeHtml(threadId)}"${commentAttr} title="Add this to Claude's context">${ICONS.claudeAdd}</button>`
+      `<button class="icon-btn ctx-btn" data-action="addContext" data-thread="${escapeHtml(threadId)}"${commentAttr} title="Add this to Claude's context">${this.clawdIcon}</button>`
     );
   }
 
@@ -457,7 +467,8 @@ export class PrDetailPanel {
     ];
     if (thread.kind === 'review' && root?.path) {
       lines.push(`File: ${root.path}${thread.line != null ? ` (line ${thread.line})` : ''}`);
-      if (root.diff_hunk) lines.push(`Diff:\n${root.diff_hunk}`);
+      // Keep enough of the hunk for Claude to locate the code, but stay lean.
+      if (root.diff_hunk) lines.push('Diff:\n' + lastLines(root.diff_hunk, 15));
     }
     for (const c of comments) {
       lines.push(`@${c.user.login} (${c.created_at}):\n${c.body}`);
@@ -588,7 +599,7 @@ export class PrDetailPanel {
         <span class="path">${escapeHtml(thread.title)}</span>
         ${
           thread.path
-            ? `<button class="icon-btn" data-action="openFile" data-path="${escapeHtml(thread.path)}" data-line="${thread.line ?? ''}" title="Open ${escapeHtml(thread.path)} in editor">${ICONS.file}</button>`
+            ? `<button class="icon-btn" data-action="openFile" data-path="${escapeHtml(thread.path)}" data-line="${thread.line ?? ''}" title="Open ${escapeHtml(thread.path)}${thread.line != null ? ':' + thread.line : ''} in editor">${this.openFileIcon}</button>`
             : ''
         }
         ${thread.isOutdated ? '<span class="chip chip-yellow">Outdated</span>' : ''}
@@ -647,11 +658,12 @@ export class PrDetailPanel {
           )
           .join('')
       : '<div class="muted small">No one assigned</div>';
+    const labelBase = `https://github.com/${this.repoFull}/pulls?q=${encodeURIComponent('is:pr')}`;
     const labels = pr.labels.length
       ? `<div class="label-wrap">${pr.labels
           .map(
             (l) =>
-              `<span class="chip" style="background:#${l.color}" data-color="${l.color}">${escapeHtml(l.name)}</span>`
+              `<a class="chip" href="${labelBase}+${encodeURIComponent('label:"' + l.name + '"')}" style="background:#${l.color}" data-color="${l.color}" title="Filter by ${escapeHtml(l.name)}">${escapeHtml(l.name)}</a>`
           )
           .join('')}</div>`
       : '<div class="muted small">None yet</div>';
@@ -776,7 +788,7 @@ export class PrDetailPanel {
           ${this.collapseBtn()}
           ${letter}
           <span class="path">${escapeHtml(f.filename)}</span>
-          <button class="icon-btn" data-action="openFile" data-path="${escapeHtml(f.filename)}" title="Open ${escapeHtml(f.filename)} in editor">${ICONS.file}</button>
+          <button class="icon-btn" data-action="openFile" data-path="${escapeHtml(f.filename)}" title="Open ${escapeHtml(f.filename)} in editor">${this.openFileIcon}</button>
           <span class="spacer"></span>
           <span class="adds" title="${f.additions} additions">+${f.additions}</span>
           <span class="dels" title="${f.deletions} deletions">−${f.deletions}</span>
@@ -877,15 +889,20 @@ export class PrDetailPanel {
     const resolve = thread.isResolved
       ? ''
       : `<button class="btn-success btn-small" data-action="resolveThread" data-thread="${escapeHtml(thread.id)}" title="Mark this conversation as resolved on GitHub">Resolve conversation</button>`;
+    const openFile = thread.path
+      ? `<button class="icon-btn" data-action="openFile" data-path="${escapeHtml(thread.path)}" data-line="${thread.line ?? ''}" title="Open ${escapeHtml(thread.path)}${thread.line != null ? ':' + thread.line : ''} in editor">${this.openFileIcon}</button>`
+      : '';
     return `
     <div class="inline-thread" data-container="${escapeHtml(thread.id)}">
       <div class="inline-thread-header">
         <span class="muted small">Review comment</span>
         <span class="spacer"></span>
         ${resolve}
+        ${openFile}
         ${this.headerActions(thread.id, thread.comments[0]?.html_url ?? '')}
       </div>
       ${comments}
+      ${this.replyBoxHtml(thread.id)}
     </div>`;
   }
 
@@ -955,8 +972,10 @@ export class PrDetailPanel {
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src https: data:;">
 <style>
-  :root { --border: var(--vscode-panel-border); --header-bg: var(--vscode-sideBar-background); --add-bg: #2da44e1f; --del-bg: #cf222e1f; --success: #238636; --danger: #da3633; }
-  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 0 20px 48px; max-width: 1280px; margin: 0 auto; font-size: 13px; }
+  :root { --border: var(--vscode-panel-border); --header-bg: var(--vscode-sideBar-background); --add-bg: #2da44e1f; --del-bg: #cf222e1f; --success: #238636; --danger: #da3633; --gh-accent: #1f6feb; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, var(--vscode-font-family), sans-serif; color: var(--vscode-foreground); padding: 0 20px 48px; max-width: 1280px; margin: 0 auto; font-size: 13px; }
+  a.chip { text-decoration: none; }
+  a.chip:hover { text-decoration: none; opacity: 0.85; }
   a { color: var(--vscode-textLink-foreground); text-decoration: none; }
   a:hover { text-decoration: underline; }
   .muted { color: var(--vscode-descriptionForeground); }
@@ -974,7 +993,8 @@ export class PrDetailPanel {
   .chip-grey { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
 
   .tabs { display: flex; gap: 4px; align-items: center; border-bottom: 1px solid var(--border); margin: 14px 0 18px; position: sticky; top: 0; background: var(--vscode-editor-background); z-index: 5; }
-  .tab-refresh { margin-right: 4px; }
+  .tab-actions { display: flex; align-items: center; gap: 6px; margin-right: 4px; }
+  .tab-actions .btn-secondary { display: inline-flex; align-items: center; }
   .tab { background: none; border: none; border-bottom: 2px solid transparent; color: var(--vscode-foreground); padding: 8px 14px; cursor: pointer; font-size: 13px; }
   .tab.active { border-bottom-color: var(--vscode-focusBorder); font-weight: 600; }
   .tab .count { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-radius: 999px; padding: 0 7px; font-size: 11px; margin-left: 4px; }
@@ -1020,8 +1040,8 @@ export class PrDetailPanel {
 
   .icon-btn { background: none; border: none; color: var(--vscode-descriptionForeground); cursor: pointer; padding: 3px; border-radius: 4px; display: inline-flex; align-items: center; }
   .icon-btn:hover { background: var(--vscode-toolbar-hoverBackground); color: var(--vscode-foreground); }
-  .btn-primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 5px; padding: 5px 14px; cursor: pointer; font-size: 12px; font-weight: 600; }
-  .btn-primary:hover { background: var(--vscode-button-hoverBackground); }
+  .btn-primary { background: var(--gh-accent); color: #fff; border: none; border-radius: 6px; padding: 5px 14px; cursor: pointer; font-size: 12px; font-weight: 600; }
+  .btn-primary:hover { background: #388bfd; }
   .btn-success { background: var(--success); color: #fff; border: none; border-radius: 5px; padding: 5px 14px; cursor: pointer; font-size: 12px; font-weight: 600; }
   .btn-success:hover { background: #2ea043; }
   .btn-danger { background: var(--danger); color: #fff; border: none; border-radius: 5px; padding: 5px 14px; cursor: pointer; font-size: 12px; font-weight: 600; }
@@ -1119,15 +1139,16 @@ export class PrDetailPanel {
     <span class="status" style="background:${STATUS_COLOR[status]}">${status}</span>
     <span class="branch">${escapeHtml(pr.head.ref)}</span> → <span class="branch">${escapeHtml(pr.base.ref)}</span>
     <span class="muted">by ${escapeHtml(pr.user.login)}</span>
-    <span class="spacer"></span>
-    <button class="btn-secondary btn-small" data-action="checkout" title="Check out ${escapeHtml(pr.head.ref)} locally">${ICONS.branch}&nbsp;Checkout branch</button>
   </div>
 
   <div class="tabs">
     <button class="tab active" data-tab="conversation">Conversation<span class="count">${detail.threads.reduce((n, t) => n + t.comments.length, 0)}</span></button>
     <button class="tab" data-tab="files">Files Changed<span class="count">${detail.files.length}</span></button>
     <span class="spacer"></span>
-    <button class="icon-btn tab-refresh" data-action="refresh" title="Refresh pull request data">${ICONS.sync}</button>
+    <div class="tab-actions">
+      <button class="btn-secondary btn-small" data-action="checkout" title="Check out ${escapeHtml(pr.head.ref)} locally">${ICONS.branch}&nbsp;Checkout</button>
+      <button class="btn-secondary btn-small" data-action="refresh" title="Refresh pull request data">${ICONS.sync}&nbsp;Refresh</button>
+    </div>
   </div>
 
   <div id="tab-conversation">
@@ -1273,6 +1294,12 @@ function timeAgo(iso: string): string {
     if (value >= 1) return `${value} ${name}${value > 1 ? 's' : ''} ago`;
   }
   return 'just now';
+}
+
+/** Keeps only the final n lines of a string. */
+function lastLines(text: string, n: number): string {
+  const lines = text.split('\n');
+  return lines.slice(Math.max(0, lines.length - n)).join('\n');
 }
 
 /** The last line of a review-comment diff hunk = the commented line's current content. */
