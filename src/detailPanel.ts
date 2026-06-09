@@ -1042,6 +1042,16 @@ export class PrDetailPanel {
   .icon-btn:hover { background: var(--vscode-toolbar-hoverBackground); color: var(--vscode-foreground); }
   .btn-primary { background: var(--gh-accent); color: #fff; border: none; border-radius: 6px; padding: 5px 14px; cursor: pointer; font-size: 12px; font-weight: 600; }
   .btn-primary:hover { background: #388bfd; }
+  /* GitHub-style secondary button — adapts to light/dark via theme vars */
+  .btn-secondary {
+    display: inline-flex; align-items: center; gap: 5px;
+    background: var(--vscode-button-secondaryBackground, var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.12)));
+    color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+    border: 1px solid var(--vscode-contrastBorder, var(--border));
+    border-radius: 6px; padding: 4px 12px; cursor: pointer; font-size: 12px; font-weight: 500;
+  }
+  .btn-secondary:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.22))); }
+  .btn-secondary svg { width: 14px; height: 14px; }
   .btn-success { background: var(--success); color: #fff; border: none; border-radius: 5px; padding: 5px 14px; cursor: pointer; font-size: 12px; font-weight: 600; }
   .btn-success:hover { background: #2ea043; }
   .btn-danger { background: var(--danger); color: #fff; border: none; border-radius: 5px; padding: 5px 14px; cursor: pointer; font-size: 12px; font-weight: 600; }
@@ -1146,8 +1156,8 @@ export class PrDetailPanel {
     <button class="tab" data-tab="files">Files Changed<span class="count">${detail.files.length}</span></button>
     <span class="spacer"></span>
     <div class="tab-actions">
-      <button class="btn-secondary btn-small" data-action="checkout" title="Check out ${escapeHtml(pr.head.ref)} locally">${ICONS.branch}&nbsp;Checkout</button>
-      <button class="btn-secondary btn-small" data-action="refresh" title="Refresh pull request data">${ICONS.sync}&nbsp;Refresh</button>
+      <button class="btn-secondary btn-small" data-action="checkout" title="Check out ${escapeHtml(pr.head.ref)} locally">${ICONS.branch}<span>Checkout</span></button>
+      <button class="btn-secondary btn-small" data-action="refresh" title="Refresh pull request data">${ICONS.sync}<span>Refresh</span></button>
     </div>
   </div>
 

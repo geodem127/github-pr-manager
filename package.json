@@ -119,13 +119,13 @@
         },
         "prManager.chatMode": {
           "type": "string",
-          "enum": ["claude-code", "builtin"],
+          "enum": ["builtin", "claude-code"],
           "enumDescriptions": [
-            "Open the real Claude Code CLI in an integrated terminal (slash commands, autocomplete, tool use) and feed attached comments to it.",
-            "Use the built-in chat panel inside the extension."
+            "Use the built-in Claude chat panel in the right sidebar (a chat UI backed by the Claude CLI).",
+            "Open the Claude CLI in an integrated terminal and feed attached comments to it."
           ],
-          "default": "claude-code",
-          "description": "Where 'Add to Claude context' sends comments/reviews: the Claude integrated terminal or the built-in chat panel."
+          "default": "builtin",
+          "description": "Where 'Add to Claude context' sends comments/reviews: the built-in Claude chat panel or the Claude integrated terminal."
         },
         "prManager.instructionsPath": {
           "type": "string",
