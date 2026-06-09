@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { exec } from 'child_process';
 import { GitHubClient, PullRequest } from './github';
 import { PrListViewProvider } from './prListView';
 import { PrDetailPanel } from './detailPanel';
@@ -11,18 +12,58 @@ async function getGitRepo(): Promise<any | undefined> {
   return git.repositories[0];
 }
 
-/** Best-effort checkout of the PR's head branch when a PR is selected. */
-async function checkoutPrBranch(pr: PullRequest): Promise<void> {
+function execGit(args: string): Promise<string> {
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!cwd) return Promise.reject(new Error('No workspace folder open.'));
+  return new Promise((resolve, reject) => {
+    exec(`git ${args}`, { cwd }, (err, stdout, stderr) => {
+      if (err) reject(new Error((stderr || stdout || err.message).trim()));
+      else resolve(stdout);
+    });
+  });
+}
+
+/**
+ * Checks out the PR's head branch on demand, prompting when the working tree
+ * is dirty (stash / discard / cancel).
+ */
+async function checkoutPrBranch(pr: PullRequest): Promise<boolean> {
   const repo = await getGitRepo();
-  if (!repo) return;
-  const branch = pr.head.ref;
-  if (repo.state.HEAD?.name === branch) return;
-  if (repo.state.workingTreeChanges.length > 0 || repo.state.indexChanges.length > 0) {
-    vscode.window.showWarningMessage(
-      `Not switching to "${branch}": you have uncommitted changes.`
-    );
-    return;
+  if (!repo) {
+    vscode.window.showErrorMessage('No Git repository available.');
+    return false;
   }
+  const branch = pr.head.ref;
+  if (repo.state.HEAD?.name === branch) {
+    vscode.window.setStatusBarMessage(`Already on ${branch}`, 2500);
+    return true;
+  }
+
+  const dirty =
+    repo.state.workingTreeChanges.length > 0 || repo.state.indexChanges.length > 0;
+  if (dirty) {
+    const pick = await vscode.window.showWarningMessage(
+      `You have uncommitted changes. How should switching to "${branch}" handle them?`,
+      { modal: true },
+      'Stash & Checkout',
+      'Discard & Checkout'
+    );
+    if (pick === undefined) return false;
+    try {
+      if (pick === 'Stash & Checkout') {
+        await execGit('stash push -u -m "github-pr-manager: auto-stash before checkout"');
+      } else {
+        await execGit('reset --hard');
+        await execGit('clean -fd');
+      }
+    } catch (err) {
+      vscode.window.showErrorMessage(
+        `Could not prepare working tree: ${err instanceof Error ? err.message : err}`
+      );
+      return false;
+    }
+  }
+
   try {
     await repo.checkout(branch);
   } catch {
@@ -30,13 +71,14 @@ async function checkoutPrBranch(pr: PullRequest): Promise<void> {
       await repo.fetch();
       await repo.createBranch(branch, true, `origin/${branch}`);
     } catch (err) {
-      vscode.window.showWarningMessage(
+      vscode.window.showErrorMessage(
         `Could not check out "${branch}": ${err instanceof Error ? err.message : err}`
       );
-      return;
+      return false;
     }
   }
   vscode.window.setStatusBarMessage(`Checked out ${branch}`, 3000);
+  return true;
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -49,7 +91,6 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  // After a reply/comment is posted from the right panel, refresh the center panel.
   const conversation = new ConversationViewProvider(client, () => PrDetailPanel.refreshCurrent());
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ConversationViewProvider.viewId, conversation, {
@@ -57,7 +98,18 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  // Header: name of repository.
+  // Reflect git working-tree state on the matching PR row.
+  const refreshGitState = () => void prList.refreshGitState();
+  const gitExt = vscode.extensions.getExtension('vscode.git');
+  if (gitExt) {
+    (gitExt.isActive ? Promise.resolve(gitExt.exports) : gitExt.activate()).then((api) => {
+      const git = api.getAPI(1);
+      const hook = (repo: any) => repo.state.onDidChange(refreshGitState);
+      git.repositories.forEach(hook);
+      context.subscriptions.push(git.onDidOpenRepository(hook));
+    });
+  }
+
   const setTitle = async () => {
     try {
       const repo = await client.getRepo();
@@ -76,12 +128,18 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('prManager.filter', () => prList.pickFilter()),
     vscode.commands.registerCommand('prManager.sort', () => prList.pickSort()),
     vscode.commands.registerCommand('prManager.openPr', async (pr: PullRequest) => {
-      // Selecting a PR resets the right panel until a conversation is chosen.
-      conversation.clear();
-      await checkoutPrBranch(pr);
+      // Selecting a PR no longer checks out the branch — use the center-panel button.
       try {
         await PrDetailPanel.show(context.extensionUri, client, pr, {
           onOpenThread: (p, thread) => conversation.showThread(p, thread),
+          onAddContext: (label, contentText) => conversation.addContext(label, contentText),
+          onCheckout: async (p) => {
+            const ok = await checkoutPrBranch(p);
+            if (ok) {
+              prList.refreshGitState();
+              PrDetailPanel.refreshCurrent();
+            }
+          },
         });
       } catch (err) {
         vscode.window.showErrorMessage(

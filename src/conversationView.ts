@@ -24,6 +24,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
   private thread?: Thread;
   private chat: ChatTurn[] = [];
   private responses = new Map<string, string>();
+  private contextItems: Array<{ label: string; content: string }> = [];
   private busy = false;
   private cancelSource?: vscode.CancellationTokenSource;
 
@@ -41,6 +42,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       switch (msg.command) {
         case 'ready':
           this.pushThread();
+          this.pushContext();
           break;
         case 'generateFix':
           await this.askClaude(
@@ -52,6 +54,16 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
           if (typeof msg.text === 'string' && msg.text.trim()) {
             await this.askClaude(msg.text.trim(), null);
           }
+          break;
+        case 'removeContext':
+          if (typeof msg.index === 'number') {
+            this.contextItems.splice(msg.index, 1);
+            this.pushContext();
+          }
+          break;
+        case 'clearContext':
+          this.contextItems = [];
+          this.pushContext();
           break;
         case 'reply':
           if (typeof msg.text === 'string' && msg.text.trim()) {
@@ -82,7 +94,30 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     this.thread = undefined;
     this.chat = [];
     this.responses.clear();
+    this.contextItems = [];
     void this.view?.webview.postMessage({ command: 'clear' });
+  }
+
+  /** Adds a comment/review to the chat's context and reveals the panel. */
+  addContext(label: string, content: string): void {
+    this.contextItems.push({ label, content });
+    const reveal = () => {
+      this.view?.show?.(true);
+      this.pushContext();
+    };
+    if (this.view) {
+      reveal();
+    } else {
+      vscode.commands.executeCommand(`${ConversationViewProvider.viewId}.focus`);
+      setTimeout(reveal, 400);
+    }
+  }
+
+  private pushContext(): void {
+    void this.view?.webview.postMessage({
+      command: 'setContext',
+      items: this.contextItems.map((c) => c.label),
+    });
   }
 
   showThread(pr: PullRequest, thread: Thread): void {
@@ -154,10 +189,6 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
 
   private async askClaude(userMessage: string, statusLabel: string | null): Promise<void> {
     if (!this.view) return;
-    if (!this.thread) {
-      vscode.window.showWarningMessage('Select a conversation from a pull request first.');
-      return;
-    }
     if (this.busy) {
       vscode.window.showWarningMessage('Claude is already working — wait or cancel first.');
       return;
@@ -172,8 +203,14 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       .map((turn) => `${turn.role === 'user' ? 'User' : 'Claude'}: ${turn.text}`)
       .join('\n\n');
 
+    const contextBlock = this.contextItems.length
+      ? this.contextItems
+          .map((c, i) => `--- Context ${i + 1}: ${c.label} ---\n${c.content}`)
+          .join('\n\n')
+      : this.threadContext();
+
     const prompt = [
-      this.threadContext(),
+      contextBlock,
       transcript ? `--- Previous conversation with the user ---\n${transcript}` : '',
       `--- Request ---\n${userMessage}`,
       EDIT_FORMAT_INSTRUCTIONS,
@@ -346,13 +383,29 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
 
   /* chat box pinned at the bottom */
   #chatSection { flex-shrink: 0; border-top: 1px solid var(--border); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); padding: 8px 12px 10px; }
+
+  /* Claude context chips */
+  #contextSection { margin-bottom: 10px; }
+  .ctx-head { display: flex; align-items: center; gap: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-descriptionForeground); margin-bottom: 6px; }
+  .ctx-chips { display: flex; flex-direction: column; gap: 4px; }
+  .ctx-chip { display: flex; align-items: center; gap: 6px; background: var(--vscode-textCodeBlock-background); border: 1px solid var(--vscode-charts-purple); border-radius: 6px; padding: 3px 6px 3px 8px; font-size: 11px; }
+  .ctx-chip .ctx-icon { color: var(--vscode-charts-purple); display: inline-flex; flex-shrink: 0; }
+  .ctx-chip .ctx-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 </head>
 <body>
-  <div id="empty" class="muted">Open a pull request and choose a conversation to view it here.</div>
+  <div id="empty" class="muted">Add a comment or review to Claude's context from the center panel, or just start chatting below.</div>
 
   <div id="content">
     <div id="scrollArea">
+      <div id="contextSection" style="display:none">
+        <div class="ctx-head">
+          <span>Claude context</span>
+          <span class="spacer"></span>
+          <button class="icon-btn" id="ctxClear" title="Clear all context">Clear</button>
+        </div>
+        <div class="ctx-chips" id="ctxChips"></div>
+      </div>
       <div id="title"></div>
       <div id="subtitle"></div>
       <div id="diff"></div>
@@ -405,10 +458,36 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     const msg = event.data;
     switch (msg.command) {
       case 'clear': {
-        $('empty').style.display = '';
-        $('content').style.display = 'none';
+        // Keep the chat usable; just reset thread view + context.
+        $('content').style.display = 'flex';
+        $('empty').style.display = 'none';
+        $('title').textContent = '';
+        $('subtitle').textContent = '';
+        $('diff').innerHTML = '';
+        $('comments').innerHTML = '';
+        $('btnFix').style.display = 'none';
+        $('contextSection').style.display = 'none';
+        $('ctxChips').innerHTML = '';
         $('claudeLog').innerHTML = '';
         $('replyBox').classList.remove('visible');
+        break;
+      }
+      case 'setContext': {
+        $('content').style.display = 'flex';
+        $('empty').style.display = 'none';
+        const chips = $('ctxChips');
+        if (!msg.items.length) {
+          $('contextSection').style.display = 'none';
+          chips.innerHTML = '';
+          break;
+        }
+        $('contextSection').style.display = '';
+        const SPARK = '<svg class="spark" width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1 6.7 4.7 3 6l3.7 1.3L8 11l1.3-3.7L13 6 9.3 4.7 8 1Z"/></svg>';
+        chips.innerHTML = msg.items.map((label, i) =>
+          '<div class="ctx-chip"><span class="ctx-icon">' + SPARK + '</span>' +
+          '<span class="ctx-label" title="' + label.replace(/"/g, '&quot;') + '">' + label + '</span>' +
+          '<button class="icon-btn ctx-remove" data-index="' + i + '" title="Remove from context">✕</button></div>'
+        ).join('');
         break;
       }
       case 'setThread': {
@@ -546,7 +625,14 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     }
   });
 
+  $('ctxClear').addEventListener('click', () => vscode.postMessage({ command: 'clearContext' }));
+
   document.addEventListener('click', (e) => {
+    const rm = e.target.closest('.ctx-remove');
+    if (rm) {
+      vscode.postMessage({ command: 'removeContext', index: Number(rm.dataset.index) });
+      return;
+    }
     const fileBtn = e.target.closest('[data-path]');
     if (fileBtn) {
       vscode.postMessage({ command: 'openFile', path: fileBtn.dataset.path });
@@ -559,6 +645,9 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     }
   });
 
+  // Chat is always available, even before any context is added.
+  $('content').style.display = 'flex';
+  $('empty').style.display = 'none';
   vscode.postMessage({ command: 'ready' });
 </script>
 </body>

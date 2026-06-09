@@ -1,6 +1,36 @@
 import * as vscode from 'vscode';
+import { exec } from 'child_process';
 import { GitHubClient, PullRequest, PrStatus, prStatus } from './github';
 import { escapeHtml } from './markdown';
+
+interface GitState {
+  branch?: string;
+  dirty: boolean;
+  ahead: number;
+}
+
+function computeGitState(): Promise<GitState> {
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!cwd) return Promise.resolve({ dirty: false, ahead: 0 });
+  return new Promise((resolve) => {
+    exec('git status --porcelain=v1 --branch', { cwd }, (err, stdout) => {
+      if (err) {
+        resolve({ dirty: false, ahead: 0 });
+        return;
+      }
+      const lines = stdout.split('\n');
+      const header = lines[0] ?? '';
+      const branchMatch = header.match(/^## (?:No commits yet on )?([^.\s]+)/);
+      const aheadMatch = header.match(/ahead (\d+)/);
+      const dirty = lines.slice(1).some((l) => l.trim().length > 0);
+      resolve({
+        branch: branchMatch?.[1],
+        dirty,
+        ahead: aheadMatch ? parseInt(aheadMatch[1], 10) : 0,
+      });
+    });
+  });
+}
 
 type SortKey = 'newest' | 'oldest' | 'updated' | 'title';
 
@@ -30,8 +60,15 @@ export class PrListViewProvider implements vscode.WebviewViewProvider {
   private sort: SortKey = 'newest';
   private pendingTitle?: string;
   private selected?: number;
+  private gitState: GitState = { dirty: false, ahead: 0 };
 
   constructor(private readonly client: GitHubClient) {}
+
+  /** Recompute git working-tree state and re-render indicators. */
+  async refreshGitState(): Promise<void> {
+    this.gitState = await computeGitState();
+    this.render();
+  }
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
@@ -70,6 +107,7 @@ export class PrListViewProvider implements vscode.WebviewViewProvider {
       if (force || this.prs.length === 0) {
         this.prs = await this.client.listPullRequests();
       }
+      this.gitState = await computeGitState();
       this.error = undefined;
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
@@ -96,6 +134,13 @@ export class PrListViewProvider implements vscode.WebviewViewProvider {
       rows: visible.map((pr) => {
         const status = prStatus(pr);
         const assignee = pr.assignees[0];
+        const onThisBranch = !!this.gitState.branch && pr.head.ref === this.gitState.branch;
+        const indicator =
+          onThisBranch && this.gitState.dirty
+            ? 'uncommitted changes'
+            : onThisBranch && this.gitState.ahead > 0
+              ? `${this.gitState.ahead} unpushed commit${this.gitState.ahead > 1 ? 's' : ''}`
+              : '';
         return {
           number: pr.number,
           titleText: escapeHtml(pr.title),
@@ -110,6 +155,7 @@ export class PrListViewProvider implements vscode.WebviewViewProvider {
             : null,
           status,
           statusColor: STATUS_COLOR[status],
+          indicator,
         };
       }),
     });
@@ -252,7 +298,8 @@ export class PrListViewProvider implements vscode.WebviewViewProvider {
   .row { display: flex; align-items: center; gap: 6px; padding: 5px 8px; cursor: pointer; border-bottom: 1px solid var(--vscode-panel-border); }
   .row:hover { background: var(--vscode-list-hoverBackground); }
   .row.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
-  .pr-ico { display: inline-flex; flex-shrink: 0; }
+  .pr-ico { display: inline-flex; flex-shrink: 0; position: relative; }
+  .dirty-dot { position: absolute; top: -1px; right: -2px; width: 7px; height: 7px; border-radius: 50%; background: #d4a72c; border: 1px solid var(--vscode-sideBar-background, var(--vscode-editor-background)); }
   .row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pr-num { color: var(--vscode-foreground); font-weight: 600; font-size: 12px; }
   .row.selected .pr-num { color: var(--vscode-list-activeSelectionForeground); }
@@ -321,7 +368,8 @@ export class PrListViewProvider implements vscode.WebviewViewProvider {
             : '<span class="avatar-fallback" title="assignee: ' + pr.assignee.login + '">' + pr.assignee.login.charAt(0).toUpperCase() + '</span>')
         : '';
       const statusChip = '<span class="chip" style="background:' + pr.statusColor + ';color:#fff">' + pr.status + '</span>';
-      const icon = '<span class="pr-ico" style="color:' + pr.statusColor + '" title="' + pr.status + '">' + (PR_ICONS[pr.status] || PR_ICONS.open) + '</span>';
+      const dot = pr.indicator ? '<span class="dirty-dot" title="' + pr.indicator + '"></span>' : '';
+      const icon = '<span class="pr-ico" style="color:' + pr.statusColor + '" title="' + pr.status + '">' + (PR_ICONS[pr.status] || PR_ICONS.open) + dot + '</span>';
       return '<div class="row' + (selected === pr.number ? ' selected' : '') + '" data-number="' + pr.number + '">' +
         icon +
         '<span class="row-title" title="[#' + pr.number + '] ' + pr.titleText + '">' +

@@ -34,10 +34,18 @@ const ICONS = {
   comment: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1 2.75C1 1.784 1.784 1 2.75 1h10.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 13.25 12H9.06l-2.573 2.573A1.458 1.458 0 0 1 4 13.543V12H2.75A1.75 1.75 0 0 1 1 10.25Z"/></svg>',
   issue: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"/><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z"/></svg>',
   chevron: '<svg class="chev" width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06Z"/></svg>',
+  branch: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Zm-6 0a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Zm8.25-.75a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"/></svg>',
+  // Claude sparkle with an arrow pointing into it — "add to Claude context"
+  claudeAdd:
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M9.5 1.6 8.4 4.3 5.7 5.4l2.7 1.1 1.1 2.7 1.1-2.7 2.7-1.1-2.7-1.1L9.5 1.6Z"/><path d="M3.25 10.5h4.19l-1.22-1.22a.75.75 0 1 1 1.06-1.06l2.5 2.5a.75.75 0 0 1 0 1.06l-2.5 2.5a.75.75 0 1 1-1.06-1.06l1.22-1.22H3.25a.75.75 0 0 1 0-1.5Z"/></svg>',
 };
 
 interface Callbacks {
   onOpenThread: (pr: PullRequest, thread: Thread) => void;
+  /** Add a comment/review to the Claude chat's context. */
+  onAddContext: (label: string, content: string) => void;
+  /** Check out the PR's head branch (handles a dirty working tree). */
+  onCheckout: (pr: PullRequest) => void | Promise<void>;
 }
 
 interface Suggestion {
@@ -120,18 +128,37 @@ export class PrDetailPanel {
     text?: string;
   }): Promise<void> {
     switch (msg.command) {
-      case 'openThread': {
+      case 'addContext': {
         const thread = this.detail?.threads.find((t) => t.id === msg.threadId);
         if (thread && this.pr) {
-          let toShow = thread;
-          if (msg.commentId) {
-            const only = thread.comments.filter((c) => String(c.id) === msg.commentId);
-            if (only.length > 0) toShow = { ...thread, comments: only };
-          }
-          this.callbacks.onOpenThread(this.pr, toShow);
+          const comments = msg.commentId
+            ? thread.comments.filter((c) => String(c.id) === msg.commentId)
+            : thread.comments;
+          const selected = comments.length > 0 ? comments : thread.comments;
+          const author = selected[0]?.user.login ?? 'unknown';
+          const label =
+            thread.kind === 'review'
+              ? `${thread.title} · @${author}`
+              : `Comment by @${author}`;
+          this.callbacks.onAddContext(label, this.contextText(thread, selected));
         }
         break;
       }
+      case 'checkout':
+        if (this.pr) await this.callbacks.onCheckout(this.pr);
+        break;
+      case 'replyThread':
+        if (msg.threadId && msg.text?.trim() && this.pr) {
+          const thread = this.detail?.threads.find((t) => t.id === msg.threadId);
+          if (thread) {
+            await this.tryAction(
+              () => this.client.reply(this.pr!.number, thread, msg.text!.trim()),
+              'Reply posted',
+              'Failed to post reply'
+            );
+          }
+        }
+        break;
       case 'copyLink':
         if (msg.url) {
           await vscode.env.clipboard.writeText(msg.url);
@@ -413,8 +440,29 @@ export class PrDetailPanel {
     const commentAttr = commentId != null ? ` data-comment="${commentId}"` : '';
     return (
       `<button class="icon-btn" data-action="copyLink" data-url="${escapeHtml(url)}" title="Copy link to this comment">${ICONS.link}</button>` +
-      `<button class="icon-btn" data-action="openThread" data-thread="${escapeHtml(threadId)}"${commentAttr} title="Open review in Chat">${this.launchIcon}</button>`
+      `<button class="icon-btn ctx-btn" data-action="addContext" data-thread="${escapeHtml(threadId)}"${commentAttr} title="Add this to Claude's context">${ICONS.claudeAdd}</button>`
     );
+  }
+
+  /** Plain-text rendering of a thread (or selected comments) for the Claude context. */
+  private contextText(thread: Thread, comments: Comment[]): string {
+    const pr = this.pr!;
+    const root = thread.comments[0];
+    const lines = [
+      `GitHub PR #${pr.number} (${this.repoFull}): "${pr.title}"`,
+      `Branch: ${pr.head.ref} -> ${pr.base.ref}`,
+      `${thread.kind === 'review' ? 'Review conversation' : 'Discussion'}: ${thread.title}` +
+        (thread.isOutdated ? ' [outdated]' : '') +
+        (thread.isResolved ? ' [resolved]' : ''),
+    ];
+    if (thread.kind === 'review' && root?.path) {
+      lines.push(`File: ${root.path}${thread.line != null ? ` (line ${thread.line})` : ''}`);
+      if (root.diff_hunk) lines.push(`Diff:\n${root.diff_hunk}`);
+    }
+    for (const c of comments) {
+      lines.push(`@${c.user.login} (${c.created_at}):\n${c.body}`);
+    }
+    return lines.join('\n');
   }
 
   private collapseBtn(): string {
@@ -426,17 +474,24 @@ export class PrDetailPanel {
   private discussionHtml(thread: Thread): string {
     return thread.comments
       .map((c) => {
-        const verdict = c.reviewState
-          ? c.reviewState === 'APPROVED'
+        const fstatus =
+          c.reviewState === 'APPROVED'
+            ? 'approved'
+            : c.reviewState === 'CHANGES_REQUESTED'
+              ? 'changes'
+              : 'comment';
+        const verdict =
+          c.reviewState === 'APPROVED'
             ? '<span class="chip chip-green">approved</span>'
             : c.reviewState === 'CHANGES_REQUESTED'
               ? '<span class="chip chip-red">changes requested</span>'
-              : '<span class="chip chip-grey">reviewed</span>'
-          : '';
+              : c.reviewState
+                ? '<span class="chip chip-grey">reviewed</span>'
+                : '';
         return `
-      <div class="timeline-item">
+      <div class="timeline-item filter-item" data-fauthor="${escapeHtml(c.user.login)}" data-fstatus="${fstatus}" data-ftype="comment">
         ${this.avatar(c.user, 32)}
-        <div class="bubble bubble-comment collapsible">
+        <div class="bubble bubble-comment collapsible st-${fstatus}">
           <div class="bubble-header">
             ${this.collapseBtn()}
             <strong>${escapeHtml(c.user.login)}</strong>
@@ -445,11 +500,25 @@ export class PrDetailPanel {
             <span class="spacer"></span>
             ${this.headerActions(thread.id, c.html_url, c.id)}
           </div>
-          <div class="card-body"><div class="bubble-body">${this.commentBody(c)}</div></div>
+          <div class="card-body">
+            <div class="bubble-body">${this.commentBody(c)}</div>
+            ${this.replyBoxHtml(thread.id)}
+          </div>
         </div>
       </div>`;
       })
       .join('');
+  }
+
+  /** GitHub-style collapsed reply affordance that expands into a textarea. */
+  private replyBoxHtml(threadId: string): string {
+    return `
+    <div class="reply" data-thread="${escapeHtml(threadId)}">
+      <textarea class="reply-input" rows="1" placeholder="Reply…"></textarea>
+      <div class="reply-actions">
+        <button class="btn-success btn-small reply-submit">Reply</button>
+      </div>
+    </div>`;
   }
 
   /** Diff hunk with old/new line-number gutters (matches Files Changed styling). */
@@ -509,8 +578,11 @@ export class PrDetailPanel {
       )
       .join('');
 
+    const fstatus = thread.isResolved ? 'resolved' : thread.isOutdated ? 'outdated' : 'unresolved';
+    const author = root?.user.login ?? 'unknown';
     return `
-    <div class="thread-card collapsible ${thread.isResolved ? 'resolved' : ''}" data-container="${escapeHtml(thread.id)}">
+    <div class="timeline-item filter-item" data-fauthor="${escapeHtml(author)}" data-fstatus="${fstatus}" data-ftype="review">
+    <div class="thread-card collapsible st-${fstatus} ${thread.isResolved ? 'resolved' : ''}" data-container="${escapeHtml(thread.id)}">
       <div class="file-header">
         ${this.collapseBtn()}
         <span class="path">${escapeHtml(thread.title)}</span>
@@ -527,6 +599,7 @@ export class PrDetailPanel {
       <div class="card-body">
         ${hunk}
         ${comments}
+        ${this.replyBoxHtml(thread.id)}
         <div class="thread-footer">
           ${
             thread.isResolved
@@ -535,6 +608,7 @@ export class PrDetailPanel {
           }
         </div>
       </div>
+    </div>
     </div>`;
   }
 
@@ -823,7 +897,38 @@ export class PrDetailPanel {
     const discussionThreads = detail.threads.filter((t) => t.kind === 'discussion');
     const reviewThreads = detail.threads.filter((t) => t.kind === 'review');
 
+    const authors = [
+      ...new Set(detail.threads.flatMap((t) => t.comments.map((c) => c.user.login))),
+    ].sort();
+    const authorOptions = authors
+      .map((a) => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`)
+      .join('');
+    const filterBar = detail.threads.length
+      ? `<div class="filter-bar">
+           <span class="filter-title">Filter</span>
+           <select id="fAuthor" title="Filter by author"><option value="all">All authors</option>${authorOptions}</select>
+           <select id="fStatus" title="Filter by status">
+             <option value="all">All statuses</option>
+             <option value="comment">Comments</option>
+             <option value="approved">Approved</option>
+             <option value="changes">Changes requested</option>
+             <option value="unresolved">Unresolved</option>
+             <option value="resolved">Resolved</option>
+             <option value="outdated">Outdated</option>
+           </select>
+           <select id="fType" title="Filter by type">
+             <option value="all">All types</option>
+             <option value="comment">Comments</option>
+             <option value="review">Review conversations</option>
+           </select>
+           <span class="spacer"></span>
+           <button class="btn-secondary btn-small" id="fClear">Clear</button>
+         </div>
+         <div id="filterEmpty" class="muted small" style="display:none;margin:10px 0">Nothing matches these filters.</div>`
+      : '';
+
     const conversationHtml =
+      filterBar +
       `
       <div class="timeline-item">
         ${this.avatar(pr.user, 32)}
@@ -981,6 +1086,27 @@ export class PrDetailPanel {
   .fstat { font-weight: 700; font-size: 12px; width: 14px; text-align: center; }
   .fadd { color: #2da44e; } .fdel { color: #e5534b; } .fmod { color: #d4a72c; } .fren { color: var(--vscode-charts-blue); }
   .adds { color: #2da44e; font-size: 12px; } .dels { color: #e5534b; font-size: 12px; }
+
+  /* status color coding (left accent) */
+  .st-approved { border-left: 3px solid #2da44e; }
+  .st-changes { border-left: 3px solid #e5534b; }
+  .st-unresolved { border-left: 3px solid #d4a72c; }
+  .st-outdated { border-left: 3px solid #d4a72c; }
+  .st-resolved { border-left: 3px solid var(--vscode-descriptionForeground); }
+  .st-comment { border-left: 3px solid var(--vscode-charts-blue); }
+  .ctx-btn:hover { color: var(--vscode-charts-purple); }
+  .ctx-btn.ctx-added { color: var(--vscode-charts-purple); background: var(--vscode-toolbar-hoverBackground); }
+
+  /* filter bar */
+  .filter-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 4px 0 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+  .filter-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-descriptionForeground); }
+  .filter-bar select { background: var(--vscode-dropdown-background, var(--vscode-input-background)); color: var(--vscode-dropdown-foreground, var(--vscode-foreground)); border: 1px solid var(--vscode-dropdown-border, var(--border)); border-radius: 4px; padding: 3px 6px; font-size: 12px; font-family: var(--vscode-font-family); }
+
+  /* inline reply */
+  .reply { margin: 8px 12px 10px; }
+  .reply-input { width: 100%; box-sizing: border-box; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--border)); border-radius: 6px; padding: 6px 8px; font-family: var(--vscode-font-family); font-size: 12px; resize: vertical; }
+  .reply-actions { display: none; justify-content: flex-end; margin-top: 6px; }
+  .reply.expanded .reply-actions { display: flex; }
 </style>
 </head>
 <body>
@@ -993,6 +1119,8 @@ export class PrDetailPanel {
     <span class="status" style="background:${STATUS_COLOR[status]}">${status}</span>
     <span class="branch">${escapeHtml(pr.head.ref)}</span> → <span class="branch">${escapeHtml(pr.base.ref)}</span>
     <span class="muted">by ${escapeHtml(pr.user.login)}</span>
+    <span class="spacer"></span>
+    <button class="btn-secondary btn-small" data-action="checkout" title="Check out ${escapeHtml(pr.head.ref)} locally">${ICONS.branch}&nbsp;Checkout branch</button>
   </div>
 
   <div class="tabs">
@@ -1037,13 +1165,23 @@ export class PrDetailPanel {
       toggle.closest('.collapsible').classList.toggle('collapsed');
       return;
     }
+    // Inline reply: expand actions on focus/click; submit posts to GitHub.
+    const replySubmit = e.target.closest('.reply-submit');
+    if (replySubmit) {
+      const wrap = replySubmit.closest('.reply');
+      const input = wrap.querySelector('.reply-input');
+      if (input.value.trim()) {
+        replySubmit.disabled = true;
+        vscode.postMessage({ command: 'replyThread', threadId: wrap.dataset.thread, text: input.value });
+      }
+      return;
+    }
     const btn = e.target.closest('[data-action]');
     if (btn) {
       const { action, thread, url, path, line, login, sid, comment } = btn.dataset;
-      if (action === 'openThread') {
-        document.querySelectorAll('.active-container').forEach((el) => el.classList.remove('active-container'));
-        const container = btn.closest('.bubble, .thread-card, .inline-thread');
-        if (container) container.classList.add('active-container');
+      if (action === 'addContext') {
+        btn.classList.add('ctx-added');
+        setTimeout(() => btn.classList.remove('ctx-added'), 600);
       }
       vscode.postMessage({
         command: action,
@@ -1063,6 +1201,44 @@ export class PrDetailPanel {
       vscode.postMessage({ command: 'openExternal', url: link.href });
     }
   });
+
+  // Expand reply action row when the textarea gains focus.
+  document.addEventListener('focusin', (e) => {
+    const input = e.target.closest('.reply-input');
+    if (input) input.closest('.reply').classList.add('expanded');
+  });
+
+  // ---- Multi-facet filters (author + status + type, combined with AND) ----
+  const fAuthor = document.getElementById('fAuthor');
+  const fStatus = document.getElementById('fStatus');
+  const fType = document.getElementById('fType');
+  if (fAuthor && fStatus && fType) {
+    const applyFilters = () => {
+      const a = fAuthor.value, s = fStatus.value, t = fType.value;
+      let visible = 0;
+      document.querySelectorAll('#tab-conversation .filter-item').forEach((item) => {
+        const okAuthor = a === 'all' || item.dataset.fauthor === a;
+        const okType = t === 'all' || item.dataset.ftype === t;
+        const okStatus = s === 'all' || item.dataset.fstatus === s;
+        const show = okAuthor && okType && okStatus;
+        item.style.display = show ? '' : 'none';
+        if (show) visible++;
+      });
+      const empty = document.getElementById('filterEmpty');
+      if (empty) empty.style.display = visible === 0 ? '' : 'none';
+      vscode.setState({ ...(vscode.getState() || {}), filters: { a, s, t } });
+    };
+    [fAuthor, fStatus, fType].forEach((el) => el.addEventListener('change', applyFilters));
+    document.getElementById('fClear').addEventListener('click', () => {
+      fAuthor.value = 'all'; fStatus.value = 'all'; fType.value = 'all';
+      applyFilters();
+    });
+    const saved = (vscode.getState() || {}).filters;
+    if (saved) {
+      fAuthor.value = saved.a; fStatus.value = saved.s; fType.value = saved.t;
+      applyFilters();
+    }
+  }
 
   const btnComment = document.getElementById('btnComment');
   if (btnComment) {
