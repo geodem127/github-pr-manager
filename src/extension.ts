@@ -4,6 +4,7 @@ import { GitHubClient, PullRequest } from './github';
 import { PrListViewProvider } from './prListView';
 import { PrDetailPanel } from './detailPanel';
 import { ConversationViewProvider } from './conversationView';
+import { ClaudeCodeBridge } from './claudeCode';
 
 async function getGitRepo(): Promise<any | undefined> {
   const gitExt = vscode.extensions.getExtension('vscode.git');
@@ -98,6 +99,18 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  const claudeCode = new ClaudeCodeBridge();
+
+  /** Route attached context to whichever chat the user prefers. */
+  const addContext = (label: string, contentText: string) => {
+    const mode = vscode.workspace.getConfiguration('prManager').get<string>('chatMode', 'claude-code');
+    if (mode === 'builtin') {
+      conversation.addContext(label, contentText);
+    } else {
+      void claudeCode.addContext(label, contentText);
+    }
+  };
+
   // Reflect git working-tree state on the matching PR row.
   const refreshGitState = () => void prList.refreshGitState();
   const gitExt = vscode.extensions.getExtension('vscode.git');
@@ -127,12 +140,13 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('prManager.filter', () => prList.pickFilter()),
     vscode.commands.registerCommand('prManager.sort', () => prList.pickSort()),
+    vscode.commands.registerCommand('prManager.openClaudeCode', () => claudeCode.open()),
     vscode.commands.registerCommand('prManager.openPr', async (pr: PullRequest) => {
       // Selecting a PR no longer checks out the branch — use the center-panel button.
       try {
         await PrDetailPanel.show(context.extensionUri, client, pr, {
           onOpenThread: (p, thread) => conversation.showThread(p, thread),
-          onAddContext: (label, contentText) => conversation.addContext(label, contentText),
+          onAddContext: addContext,
           onCheckout: async (p) => {
             const ok = await checkoutPrBranch(p);
             if (ok) {

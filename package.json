@@ -78,6 +78,11 @@
         "command": "prManager.openConversation",
         "title": "Open Conversation in Right Panel",
         "category": "PR Manager"
+      },
+      {
+        "command": "prManager.openClaudeCode",
+        "title": "Open Claude Code",
+        "category": "PR Manager"
       }
     ],
     "menus": {
@@ -111,6 +116,16 @@
           "type": "string",
           "default": "",
           "description": "Optional model override passed to the Claude CLI (--model)."
+        },
+        "prManager.chatMode": {
+          "type": "string",
+          "enum": ["claude-code", "builtin"],
+          "enumDescriptions": [
+            "Open the real Claude Code CLI in an integrated terminal (slash commands, autocomplete, tool use) and feed attached comments to it.",
+            "Use the built-in chat panel inside the extension."
+          ],
+          "default": "claude-code",
+          "description": "Where 'Add to Claude context' sends comments/reviews."
         }
       }
     }
