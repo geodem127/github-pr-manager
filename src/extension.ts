@@ -103,11 +103,15 @@ export function activate(context: vscode.ExtensionContext): void {
 
   /** Route attached context to whichever chat the user prefers. */
   const addContext = (label: string, contentText: string) => {
-    const mode = vscode.workspace.getConfiguration('prManager').get<string>('chatMode', 'builtin');
+    const mode = vscode.workspace
+      .getConfiguration('prManager')
+      .get<string>('chatMode', 'claude-code-chat');
     if (mode === 'builtin') {
       conversation.addContext(label, contentText);
-    } else {
+    } else if (mode === 'claude-code-terminal') {
       void claudeCode.addContext(label, contentText);
+    } else {
+      void claudeCode.addContextToChat(label, contentText);
     }
   };
 
@@ -141,6 +145,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('prManager.filter', () => prList.pickFilter()),
     vscode.commands.registerCommand('prManager.sort', () => prList.pickSort()),
     vscode.commands.registerCommand('prManager.openClaudeCode', () => claudeCode.open()),
+    vscode.commands.registerCommand('prManager.discoverClaudeCommands', () =>
+      claudeCode.discoverCommands()
+    ),
     vscode.commands.registerCommand('prManager.openPr', async (pr: PullRequest) => {
       // Selecting a PR no longer checks out the branch — use the center-panel button.
       try {

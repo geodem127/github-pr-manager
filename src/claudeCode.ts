@@ -42,6 +42,92 @@ export class ClaudeCodeBridge {
     // No auto-prompt: the user drives Claude. Context lives in @${CONTEXT_FILE}.
   }
 
+  /**
+   * Adds context and hands it to the official Claude Code extension's chat
+   * panel (the "CLAUDE CODE" view) rather than a terminal.
+   */
+  async addContextToChat(label: string, content: string): Promise<void> {
+    if (!this.items.some((it) => it.content === content)) {
+      this.items.push({ label, content });
+      await this.writeContextFile();
+    }
+    const prompt = `Review the attached PR context in @${CONTEXT_FILE} (latest: ${label}) and help me address it.`;
+    await this.focusClaudeCode();
+    const sent = await this.sendToClaudeCode(prompt);
+    if (!sent) {
+      await vscode.env.clipboard.writeText(prompt);
+      vscode.window.showInformationMessage(
+        `Context added to @${CONTEXT_FILE}. Prompt copied — paste it into Claude Code (⌘/Ctrl+V).`
+      );
+    }
+  }
+
+  /** Best-effort focus of the official Claude Code view. */
+  private async focusClaudeCode(): Promise<void> {
+    const all = await vscode.commands.getCommands(true);
+    const focusCmd =
+      all.find((c) => /claude/i.test(c) && /focus/i.test(c)) ??
+      ['claude-code.focus', 'anthropic.claude-code.focus', 'workbench.view.extension.claude-code'].find(
+        (c) => all.includes(c)
+      );
+    if (focusCmd) {
+      try {
+        await vscode.commands.executeCommand(focusCmd);
+      } catch {
+        // ignore — fall back to clipboard
+      }
+    }
+  }
+
+  /**
+   * Tries to send a prompt to Claude Code. Uses a user-configured command if
+   * set (prManager.claudeCodeSendCommand), else attempts discovered candidates.
+   * Returns true only when a command executed without throwing.
+   */
+  private async sendToClaudeCode(prompt: string): Promise<boolean> {
+    const configured = vscode.workspace
+      .getConfiguration('prManager')
+      .get<string>('claudeCodeSendCommand', '');
+    const candidates = configured ? [configured] : [];
+    if (!configured) {
+      const all = await vscode.commands.getCommands(true);
+      candidates.push(
+        ...all.filter((c) => /claude/i.test(c) && /(send|prompt|query|ask|message|newChat|new-chat)/i.test(c))
+      );
+    }
+    for (const cmd of candidates) {
+      try {
+        await vscode.commands.executeCommand(cmd, prompt);
+        return true;
+      } catch {
+        // try next candidate
+      }
+    }
+    return false;
+  }
+
+  /** Lists the commands the installed Claude Code extension exposes. */
+  async discoverCommands(): Promise<void> {
+    const all = await vscode.commands.getCommands(true);
+    const claude = all.filter((c) => /claude|anthropic/i.test(c)).sort();
+    if (claude.length === 0) {
+      vscode.window.showInformationMessage(
+        'No Claude Code commands found. Is the Claude Code extension installed?'
+      );
+      return;
+    }
+    const pick = await vscode.window.showQuickPick(claude, {
+      title: 'Claude Code commands (pick one to set as the "send" command)',
+      placeHolder: 'Selecting sets prManager.claudeCodeSendCommand',
+    });
+    if (pick) {
+      await vscode.workspace
+        .getConfiguration('prManager')
+        .update('claudeCodeSendCommand', pick, vscode.ConfigurationTarget.Global);
+      vscode.window.showInformationMessage(`Set Claude Code send command to "${pick}".`);
+    }
+  }
+
   /** Opens Claude Code without adding anything. */
   open(): void {
     this.ensureTerminal().show();

@@ -83,6 +83,11 @@
         "command": "prManager.openClaudeCode",
         "title": "Open Claude Code",
         "category": "PR Manager"
+      },
+      {
+        "command": "prManager.discoverClaudeCommands",
+        "title": "Discover Claude Code Commands",
+        "category": "PR Manager"
       }
     ],
     "menus": {
@@ -119,13 +124,19 @@
         },
         "prManager.chatMode": {
           "type": "string",
-          "enum": ["builtin", "claude-code"],
+          "enum": ["claude-code-chat", "claude-code-terminal", "builtin"],
           "enumDescriptions": [
-            "Use the built-in Claude chat panel in the right sidebar (a chat UI backed by the Claude CLI).",
-            "Open the Claude CLI in an integrated terminal and feed attached comments to it."
+            "Send to the official Claude Code extension's chat panel (the 'CLAUDE CODE' view).",
+            "Open the Claude CLI in an integrated terminal and feed attached comments to it.",
+            "Use the built-in Claude chat panel in the right sidebar (a chat UI backed by the Claude CLI)."
           ],
-          "default": "builtin",
-          "description": "Where 'Add to Claude context' sends comments/reviews: the built-in Claude chat panel or the Claude integrated terminal."
+          "default": "claude-code-chat",
+          "description": "Where 'Add to Claude context' sends comments/reviews."
+        },
+        "prManager.claudeCodeSendCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Command ID used to send a prompt to the official Claude Code chat. Leave empty to auto-detect; run 'PR Manager: Discover Claude Code Commands' to pick one. If sending isn't possible, the prompt is copied to the clipboard to paste into Claude Code."
         },
         "prManager.instructionsPath": {
           "type": "string",
