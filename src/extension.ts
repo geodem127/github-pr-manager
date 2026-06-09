@@ -105,7 +105,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const addContext = (label: string, contentText: string) => {
     const mode = vscode.workspace
       .getConfiguration('prManager')
-      .get<string>('chatMode', 'claude-code-chat');
+      .get<string>('chatMode', 'claude-code-terminal');
     if (mode === 'builtin') {
       conversation.addContext(label, contentText);
     } else if (mode === 'claude-code-terminal') {

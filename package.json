@@ -130,7 +130,7 @@
             "Open the Claude CLI in an integrated terminal and feed attached comments to it.",
             "Use the built-in Claude chat panel in the right sidebar (a chat UI backed by the Claude CLI)."
           ],
-          "default": "claude-code-chat",
+          "default": "claude-code-terminal",
           "description": "Where 'Add to Claude context' sends comments/reviews."
         },
         "prManager.claudeCodeAttachCommand": {
