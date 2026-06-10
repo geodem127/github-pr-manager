@@ -55,8 +55,25 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
           break;
         case 'chat':
           if (typeof msg.text === 'string' && msg.text.trim()) {
-            await this.askClaude(msg.text.trim(), null);
+            const raw = msg.text.trim();
+            if (raw.startsWith('/')) {
+              const resolved = await this.resolveSlash(raw);
+              if (resolved.unsupported) {
+                vscode.window.showWarningMessage(
+                  `"/${resolved.unsupported}" isn't available in the built-in chat. ` +
+                    `Interactive Claude Code commands work in terminal mode (prManager.chatMode); ` +
+                    `custom commands live in .claude/commands.`
+                );
+                break;
+              }
+              await this.askClaude(resolved.prompt ?? raw, raw.split(/\s/)[0]);
+            } else {
+              await this.askClaude(raw, null);
+            }
           }
+          break;
+        case 'generateReply':
+          await this.generateReply();
           break;
         case 'removeContext':
           if (typeof msg.index === 'number') {
@@ -132,6 +149,77 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       command: 'setContext',
       items: this.contextItems.map((c) => c.label),
     });
+  }
+
+  /** Drafts a reply with Claude and drops it into the reply box (no chat-log noise). */
+  private async generateReply(): Promise<void> {
+    if (!this.view) return;
+    if (this.busy) {
+      vscode.window.showWarningMessage('Claude is already working — wait or cancel first.');
+      return;
+    }
+    const ctx = this.contextItems.length
+      ? this.contextItems.map((c) => c.content).join('\n\n')
+      : this.threadContext();
+    if (!ctx) {
+      vscode.window.showWarningMessage('Add a comment/review to context first.');
+      return;
+    }
+    const prompt =
+      `${ctx}\n\n--- Task ---\n` +
+      `Draft a concise, professional reply I can post to the above PR review comment(s). ` +
+      `Output ONLY the reply text — no preamble, no markdown code fences.`;
+    this.busy = true;
+    this.cancelSource = new vscode.CancellationTokenSource();
+    this.view.webview.postMessage({ command: 'claudeStart', label: 'Generating reply…' });
+    try {
+      const result = await runClaude(
+        prompt,
+        (e) => this.view?.webview.postMessage({ command: 'claudeEvent', kind: e.type, text: e.text }),
+        this.cancelSource.token
+      );
+      this.view.webview.postMessage({ command: 'claudeDone', rid: '', html: '', editsHtml: '', canApply: false });
+      this.view.webview.postMessage({ command: 'replyDraft', text: result.trim() });
+    } catch (err) {
+      this.view.webview.postMessage({
+        command: 'claudeError',
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      this.busy = false;
+      this.cancelSource = undefined;
+    }
+  }
+
+  /** Resolves a /command in the built-in chat: expands custom command files, flags unsupported. */
+  private async resolveSlash(
+    text: string
+  ): Promise<{ prompt?: string; unsupported?: string }> {
+    const m = text.match(/^\/([\w:-]+)\s*([\s\S]*)$/);
+    if (!m) return {};
+    const name = m[1];
+    const args = m[2] ?? '';
+    const rel = name.replace(/:/g, '/') + '.md';
+    const roots: vscode.Uri[] = [];
+    const ws = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (ws) roots.push(vscode.Uri.joinPath(ws, '.claude', 'commands', rel));
+    const home = process.env.HOME || process.env.USERPROFILE;
+    if (home) roots.push(vscode.Uri.joinPath(vscode.Uri.file(home), '.claude', 'commands', rel));
+    for (const uri of roots) {
+      try {
+        const body = Buffer.from(await vscode.workspace.fs.readFile(uri))
+          .toString('utf8')
+          .replace(/^---\s*[\s\S]*?---\s*/, ''); // strip frontmatter
+        const argList = args.split(/\s+/).filter(Boolean);
+        const prompt = body
+          .replace(/\$ARGUMENTS/g, args)
+          .replace(/\$(\d+)/g, (_s, n) => argList[Number(n) - 1] ?? '');
+        return { prompt: prompt.trim() };
+      } catch {
+        // not in this root
+      }
+    }
+    return { unsupported: name };
   }
 
   /** Lets the user pick files/folders and adds them to the Claude context. */
@@ -559,6 +647,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       <div id="replyBox">
         <textarea id="replyText" rows="3" placeholder="Write a reply to post on GitHub…"></textarea>
         <div class="row">
+          <button id="btnGenReply" class="btn-secondary" title="Draft a reply with Claude and put it in the box">✨ Generate reply</button>
           <button id="btnPostReply" class="btn-success" title="Post this reply to GitHub">Post reply to GitHub</button>
         </div>
       </div>
@@ -598,7 +687,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
 
   function setBusy(value) {
     busy = value;
-    ['btnFix', 'btnSend', 'btnPostReply'].forEach((id) => ($(id).disabled = value));
+    ['btnFix', 'btnSend', 'btnPostReply', 'btnGenReply'].forEach((id) => ($(id).disabled = value));
     $('btnCancel').style.display = value ? '' : 'none';
   }
 
@@ -713,6 +802,11 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
         setBusy(false);
         if (activityGroup) activityGroup.innerHTML = '';
         if (busyEl) { busyEl.remove(); busyEl = null; }
+        // No rendered content (e.g. reply draft routed to the box) — drop the bubble.
+        if (!msg.html && !msg.editsHtml) {
+          if (streamEl) { streamEl.remove(); streamEl = null; }
+          break;
+        }
         // Finalize: replace the live stream element with rendered markdown.
         const d = streamEl || document.createElement('div');
         streamEl = null;
@@ -780,6 +874,12 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
         $('replyBox').classList.remove('visible');
         break;
       }
+      case 'replyDraft': {
+        $('replyBox').classList.add('visible');
+        $('replyText').value = msg.text;
+        $('replyText').focus();
+        break;
+      }
       case 'slashList': {
         slashList = msg.items || [];
         break;
@@ -800,6 +900,9 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     if (!busy) vscode.postMessage({ command: 'generateFix' });
   });
   $('btnReply').addEventListener('click', () => $('replyBox').classList.toggle('visible'));
+  $('btnGenReply').addEventListener('click', () => {
+    if (!busy) vscode.postMessage({ command: 'generateReply' });
+  });
   $('btnPostReply').addEventListener('click', () => {
     const text = $('replyText').value;
     if (text.trim()) vscode.postMessage({ command: 'reply', text });
