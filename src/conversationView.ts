@@ -57,6 +57,12 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
           if (typeof msg.text === 'string' && msg.text.trim()) {
             const raw = msg.text.trim();
             if (raw.startsWith('/')) {
+              if (/^\/clear\b/.test(raw)) {
+                this.chat = [];
+                this.responses.clear();
+                this.view?.webview.postMessage({ command: 'clearLog' });
+                break;
+              }
               const resolved = await this.resolveSlash(raw);
               if (resolved.unsupported) {
                 vscode.window.showWarningMessage(
@@ -267,17 +273,12 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
 
   /** Built-in + discovered custom Claude slash commands. */
   private async slashCommands(): Promise<Array<{ label: string; description: string }>> {
+    // Only commands that actually work in the built-in chat (claude -p):
+    // a locally-handled /clear, plus custom commands we expand ourselves.
+    // Interactive REPL commands (/agents, /mcp, /model, …) only exist in
+    // terminal mode, so we don't offer them here.
     const builtins: Array<{ label: string; description: string }> = [
-      { label: '/help', description: 'List available commands' },
-      { label: '/clear', description: 'Clear conversation history' },
-      { label: '/compact', description: 'Summarize and compact the conversation' },
-      { label: '/review', description: 'Review the current changes' },
-      { label: '/init', description: 'Initialize a CLAUDE.md for the project' },
-      { label: '/cost', description: 'Show token usage and cost' },
-      { label: '/model', description: 'Change the active model' },
-      { label: '/memory', description: 'Edit CLAUDE.md memory' },
-      { label: '/agents', description: 'Manage subagents' },
-      { label: '/mcp', description: 'Manage MCP servers' },
+      { label: '/clear', description: 'Clear the chat' },
     ];
 
     const custom: Array<{ label: string; description: string }> = [];
@@ -896,6 +897,10 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
         $('replyBox').classList.add('visible');
         $('replyText').value = msg.text;
         $('replyText').focus();
+        break;
+      }
+      case 'clearLog': {
+        $('claudeLog').innerHTML = '';
         break;
       }
       case 'slashList': {
