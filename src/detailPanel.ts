@@ -1079,9 +1079,14 @@ export class PrDetailPanel {
       fAuthor.value = 'all'; fStatus.value = 'all'; fType.value = 'all';
       applyFilters();
     });
+    // Restore saved filters, but only values that still exist as options
+    // (stale values would blank the <select> and hide everything).
+    const has = (sel, v) => [...sel.options].some((o) => o.value === v);
     const saved = (vscode.getState() || {}).filters;
     if (saved) {
-      fAuthor.value = saved.a; fStatus.value = saved.s; fType.value = saved.t;
+      fAuthor.value = has(fAuthor, saved.a) ? saved.a : 'all';
+      fStatus.value = has(fStatus, saved.s) ? saved.s : 'all';
+      fType.value = has(fType, saved.t) ? saved.t : 'all';
       applyFilters();
     }
   }
