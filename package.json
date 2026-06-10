@@ -124,14 +124,19 @@
         },
         "prManager.chatMode": {
           "type": "string",
-          "enum": ["claude-code-chat", "claude-code-terminal", "builtin"],
+          "enum": ["builtin", "claude-code-terminal", "claude-code-chat"],
+          "enumItemLabels": [
+            "Built-in chat panel",
+            "Claude integrated terminal",
+            "Claude Code chat panel"
+          ],
           "enumDescriptions": [
-            "Send to the official Claude Code extension's chat panel (the 'CLAUDE CODE' view).",
+            "Use the built-in Claude chat panel in the right sidebar (a chat UI backed by the Claude CLI).",
             "Open the Claude CLI in an integrated terminal and feed attached comments to it.",
-            "Use the built-in Claude chat panel in the right sidebar (a chat UI backed by the Claude CLI)."
+            "Send to the official Claude Code extension's chat panel (the 'CLAUDE CODE' view)."
           ],
           "default": "builtin",
-          "description": "Where 'Add to Claude context' sends comments/reviews."
+          "markdownDescription": "Where **Add to Claude context** sends comments/reviews:\n\n- **Built-in chat panel** — the extension's own chat in the right sidebar.\n- **Claude integrated terminal** — the `claude` CLI in a VS Code terminal.\n- **Claude Code chat panel** — the official Claude Code extension view."
         },
         "prManager.claudeCodeAttachCommand": {
           "type": "string",
