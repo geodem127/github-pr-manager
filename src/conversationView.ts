@@ -76,6 +76,12 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
         case 'openFile':
           if (typeof msg.path === 'string') await this.openFile(msg.path);
           break;
+        case 'upload':
+          await this.uploadToContext();
+          break;
+        case 'slashCommands':
+          await this.pickSlashCommand();
+          break;
         case 'cancel':
           this.cancelSource?.cancel();
           break;
@@ -123,6 +129,58 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       command: 'setContext',
       items: this.contextItems.map((c) => c.label),
     });
+  }
+
+  /** Lets the user pick files/folders and adds them to the Claude context. */
+  private async uploadToContext(): Promise<void> {
+    const picks = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: true,
+      canSelectMany: true,
+      openLabel: 'Add to Claude context',
+    });
+    if (!picks?.length) return;
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    for (const uri of picks) {
+      const full = uri.fsPath;
+      const rel = root && full.startsWith(root) ? full.slice(root.length).replace(/^[/\\]/, '') : full;
+      let stat: vscode.FileStat | undefined;
+      try {
+        stat = await vscode.workspace.fs.stat(uri);
+      } catch {
+        /* ignore */
+      }
+      const isDir = stat?.type === vscode.FileType.Directory;
+      const label = (isDir ? '📁 ' : '📄 ') + rel;
+      if (this.contextItems.some((c) => c.label === label)) continue;
+      // Reference by @-path so Claude reads it itself — keep the payload tiny.
+      this.contextItems.push({ label, content: `Attached ${isDir ? 'folder' : 'file'}: @${rel}` });
+    }
+    this.view?.show?.(true);
+    this.pushContext();
+  }
+
+  /** Shows Claude Code slash commands and inserts the chosen one into the chat box. */
+  private async pickSlashCommand(): Promise<void> {
+    const commands: Array<{ label: string; description: string }> = [
+      { label: '/help', description: 'List available commands' },
+      { label: '/clear', description: 'Clear conversation history' },
+      { label: '/compact', description: 'Summarize and compact the conversation' },
+      { label: '/review', description: 'Review the current changes' },
+      { label: '/init', description: 'Initialize a CLAUDE.md for the project' },
+      { label: '/cost', description: 'Show token usage and cost' },
+      { label: '/model', description: 'Change the active model' },
+      { label: '/diff', description: 'Show the current diff' },
+      { label: '/commit', description: 'Create a git commit' },
+      { label: '/pr', description: 'Prepare a pull request' },
+    ];
+    const pick = await vscode.window.showQuickPick(commands, {
+      title: 'Claude slash commands',
+      placeHolder: 'Insert a slash command into the chat box',
+    });
+    if (pick) {
+      void this.view?.webview.postMessage({ command: 'insertChat', text: pick.label + ' ' });
+    }
   }
 
   showThread(pr: PullRequest, thread: Thread): void {
@@ -390,12 +448,15 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
   #chatSection { flex-shrink: 0; border-top: 1px solid var(--border); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); padding: 8px 12px 10px; }
 
   /* Claude context chips */
+  .chat-toolbar { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+  .tool-btn { display: inline-flex; align-items: center; gap: 5px; background: transparent; color: var(--vscode-descriptionForeground); border: 1px solid var(--vscode-input-border, var(--border)); border-radius: 6px; padding: 3px 9px; cursor: pointer; font-size: 11px; }
+  .tool-btn:hover { background: var(--vscode-toolbar-hoverBackground); color: var(--vscode-foreground); }
   #contextSection { margin-bottom: 10px; }
   .ctx-head { display: flex; align-items: center; gap: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-descriptionForeground); margin-bottom: 6px; }
-  .ctx-chips { display: flex; flex-direction: column; gap: 4px; }
-  .ctx-chip { display: flex; align-items: center; gap: 6px; background: var(--vscode-textCodeBlock-background); border: 1px solid var(--vscode-charts-purple); border-radius: 6px; padding: 3px 6px 3px 8px; font-size: 11px; }
-  .ctx-chip .ctx-icon { color: var(--vscode-charts-purple); display: inline-flex; flex-shrink: 0; }
-  .ctx-chip .ctx-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ctx-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .ctx-chip { display: flex; align-items: center; gap: 6px; max-width: min-content; background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--border)); border-radius: 6px; padding: 3px 6px 3px 8px; font-size: 11px; }
+  .ctx-chip .ctx-icon { color: var(--vscode-charts-purple); opacity: 0.8; display: inline-flex; flex-shrink: 0; }
+  .ctx-chip .ctx-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -416,8 +477,8 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       <div id="diff"></div>
       <div id="comments"></div>
 
-      <div class="actions">
-        <button id="btnFix" class="btn-secondary" style="display:none" title="Ask Claude to investigate and propose a fix for this comment">⚡ Generate fix</button>
+      <div class="actions" id="actions" style="display:none">
+        <button id="btnFix" class="btn-secondary" title="Ask Claude to generate a fix for the attached context">⚡ Generate</button>
         <button id="btnReply" class="btn-secondary" title="Write a reply to post on GitHub">💬 Reply</button>
       </div>
 
@@ -435,7 +496,16 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
 
     <div id="chatSection">
       <textarea id="chatText" rows="3" placeholder="Ask Claude about this conversation… (Enter to send, Shift+Enter for newline)"></textarea>
-      <div class="row">
+      <div class="chat-toolbar">
+        <button class="tool-btn" id="btnUpload" title="Upload a file or folder to Claude's context">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M3.47 7.78a.75.75 0 0 1 0-1.06l4-4a.75.75 0 0 1 1.06 0l4 4a.751.751 0 0 1-.018 1.042.751.751 0 0 1-1.042.018L8.75 5.06v6.19a.75.75 0 0 1-1.5 0V5.06L4.53 7.78a.75.75 0 0 1-1.06 0Z"/><path d="M2.75 14a.75.75 0 0 1 0-1.5h10.5a.75.75 0 0 1 0 1.5Z"/></svg>
+          <span>Upload</span>
+        </button>
+        <button class="tool-btn" id="btnSlash" title="Insert a Claude slash command">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M9.875 2.27 5.09 13.61a.75.75 0 0 1-1.38-.583L8.494 1.687a.75.75 0 0 1 1.381.583Z"/></svg>
+          <span>/ Commands</span>
+        </button>
+        <span class="spacer"></span>
         <button id="btnCancel" class="stop-btn" style="display:none" title="Stop the running Claude request"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg></button>
         <button id="btnSend" class="btn-primary" title="Send to Claude">Send</button>
       </div>
@@ -470,17 +540,25 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
         $('subtitle').textContent = '';
         $('diff').innerHTML = '';
         $('comments').innerHTML = '';
-        $('btnFix').style.display = 'none';
+        $('actions').style.display = 'none';
         $('contextSection').style.display = 'none';
         $('ctxChips').innerHTML = '';
         $('claudeLog').innerHTML = '';
         $('replyBox').classList.remove('visible');
         break;
       }
+      case 'insertChat': {
+        const box = $('chatText');
+        box.value = (box.value ? box.value.replace(/\\s*$/, ' ') : '') + msg.text;
+        box.focus();
+        break;
+      }
       case 'setContext': {
         $('content').style.display = 'flex';
         $('empty').style.display = 'none';
         const chips = $('ctxChips');
+        // Generate + Reply only appear once there is context.
+        $('actions').style.display = msg.items.length ? 'flex' : 'none';
         if (!msg.items.length) {
           $('contextSection').style.display = 'none';
           chips.innerHTML = '';
@@ -498,7 +576,6 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       case 'setThread': {
         $('empty').style.display = 'none';
         $('content').style.display = 'flex';
-        $('btnFix').style.display = msg.canFix ? '' : 'none';
         $('title').textContent = msg.title;
         $('subtitle').textContent = msg.subtitle;
         $('diff').innerHTML = msg.diffHtml || '';
@@ -615,6 +692,8 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     if (text.trim()) vscode.postMessage({ command: 'reply', text });
   });
   $('btnCancel').addEventListener('click', () => vscode.postMessage({ command: 'cancel' }));
+  $('btnUpload').addEventListener('click', () => vscode.postMessage({ command: 'upload' }));
+  $('btnSlash').addEventListener('click', () => vscode.postMessage({ command: 'slashCommands' }));
 
   function sendChat() {
     const text = $('chatText').value;

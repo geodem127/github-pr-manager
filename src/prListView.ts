@@ -77,6 +77,7 @@ export class PrListViewProvider implements vscode.WebviewViewProvider {
     view.webview.html = this.shellHtml();
     view.webview.onDidReceiveMessage((msg) => {
       if (msg.command === 'ready') {
+        if (this.pendingTitle) this.post({ command: 'header', name: this.pendingTitle });
         void this.load();
       } else if (msg.command === 'open' && typeof msg.number === 'number') {
         const pr = this.prs.find((p) => p.number === msg.number);
@@ -92,7 +93,10 @@ export class PrListViewProvider implements vscode.WebviewViewProvider {
 
   setTitle(title: string): void {
     this.pendingTitle = title;
-    if (this.view) this.view.title = title;
+    if (this.view) {
+      this.view.title = title;
+      this.post({ command: 'header', name: title });
+    }
   }
 
   refresh(): void {
@@ -294,12 +298,15 @@ export class PrListViewProvider implements vscode.WebviewViewProvider {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src https: data:;">
 <style>
   body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 0; margin: 0; font-size: 12px; }
+  #header { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--vscode-panel-border); font-weight: 600; }
+  #header .hdr-ico { display: inline-flex; color: var(--vscode-foreground); flex-shrink: 0; }
+  #repoName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #status { padding: 12px; color: var(--vscode-descriptionForeground); }
-  .row { display: flex; align-items: center; gap: 6px; padding: 5px 8px; cursor: pointer; border-bottom: 1px solid var(--vscode-panel-border); }
+  .row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; cursor: pointer; border-bottom: 1px solid var(--vscode-panel-border); }
   .row:hover { background: var(--vscode-list-hoverBackground); }
   .row.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
-  .pr-ico { display: inline-flex; flex-shrink: 0; position: relative; }
-  .dirty-dot { position: absolute; top: -1px; right: -2px; width: 7px; height: 7px; border-radius: 50%; background: #d4a72c; border: 1px solid var(--vscode-sideBar-background, var(--vscode-editor-background)); }
+  .pr-avatar { position: relative; flex-shrink: 0; display: inline-flex; }
+  .dirty-dot { position: absolute; top: -2px; right: -2px; width: 9px; height: 9px; border-radius: 50%; background: #d4a72c; border: 1.5px solid var(--vscode-sideBar-background, var(--vscode-editor-background)); }
   .row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pr-num { color: var(--vscode-foreground); font-weight: 600; font-size: 12px; }
   .row.selected .pr-num { color: var(--vscode-list-activeSelectionForeground); }
@@ -307,12 +314,16 @@ export class PrListViewProvider implements vscode.WebviewViewProvider {
   .row.selected .pr-title { color: var(--vscode-list-activeSelectionForeground); opacity: 0.85; }
   .row-meta { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
   .chip { border-radius: 999px; padding: 0 6px; font-size: 9px; font-weight: 600; line-height: 14px; white-space: nowrap; }
-  .avatar { width: 16px; height: 16px; border-radius: 50%; display: block; }
-  .avatar-fallback { width: 16px; height: 16px; border-radius: 50%; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 9px; display: flex; align-items: center; justify-content: center; }
+  .avatar { width: 28px; height: 28px; border-radius: 50%; display: block; }
+  .avatar-fallback { width: 28px; height: 28px; border-radius: 50%; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 12px; display: flex; align-items: center; justify-content: center; }
   .err { color: var(--vscode-errorForeground); padding: 12px; }
 </style>
 </head>
 <body>
+  <div id="header">
+    <span class="hdr-ico"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"/></svg></span>
+    <span id="repoName">Pull Requests</span>
+  </div>
   <div id="status">Loading pull requests…</div>
   <div id="list"></div>
 <script>
@@ -336,6 +347,10 @@ export class PrListViewProvider implements vscode.WebviewViewProvider {
     const msg = event.data;
     const status = document.getElementById('status');
     const list = document.getElementById('list');
+    if (msg.command === 'header') {
+      document.getElementById('repoName').textContent = msg.name;
+      return;
+    }
     if (msg.command === 'loading') {
       status.textContent = 'Loading pull requests…';
       status.style.display = '';
@@ -362,20 +377,20 @@ export class PrListViewProvider implements vscode.WebviewViewProvider {
       const labels = pr.labels.slice(0, 3).map((l) =>
         '<span class="chip" style="background:#' + l.color + ';color:' + textColor(l.color) + '" title="' + l.name + '">' + l.name + '</span>'
       ).join('');
-      const assignee = pr.assignee
+      const inner = pr.assignee
         ? (pr.assignee.avatar
             ? '<img class="avatar" src="' + pr.assignee.avatar + '" title="assignee: ' + pr.assignee.login + '">'
             : '<span class="avatar-fallback" title="assignee: ' + pr.assignee.login + '">' + pr.assignee.login.charAt(0).toUpperCase() + '</span>')
-        : '';
-      const statusChip = '<span class="chip" style="background:' + pr.statusColor + ';color:#fff">' + pr.status + '</span>';
+        : '<span class="avatar-fallback" title="unassigned">?</span>';
       const dot = pr.indicator ? '<span class="dirty-dot" title="' + pr.indicator + '"></span>' : '';
-      const icon = '<span class="pr-ico" style="color:' + pr.statusColor + '" title="' + pr.status + '">' + (PR_ICONS[pr.status] || PR_ICONS.open) + dot + '</span>';
+      const avatar = '<span class="pr-avatar">' + inner + dot + '</span>';
+      const statusChip = '<span class="chip" style="background:' + pr.statusColor + ';color:#fff">' + pr.status + '</span>';
       return '<div class="row' + (selected === pr.number ? ' selected' : '') + '" data-number="' + pr.number + '">' +
-        icon +
+        avatar +
         '<span class="row-title" title="[#' + pr.number + '] ' + pr.titleText + '">' +
           '<span class="pr-num">[#' + pr.number + ']</span> <span class="pr-title">' + pr.titleText + '</span>' +
         '</span>' +
-        '<span class="row-meta">' + labels + assignee + statusChip + '</span>' +
+        '<span class="row-meta">' + labels + statusChip + '</span>' +
         '</div>';
     }).join('');
   });
