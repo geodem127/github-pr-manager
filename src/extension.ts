@@ -102,12 +102,16 @@ export function activate(context: vscode.ExtensionContext): void {
   const claudeCode = new ClaudeCodeBridge(context.extensionUri);
 
   /** Route attached context to whichever chat the user prefers. */
-  const addContext = (label: string, contentText: string) => {
+  const addContext = (
+    label: string,
+    contentText: string,
+    target?: { pr: PullRequest; thread: import('./github').Thread }
+  ) => {
     const mode = vscode.workspace
       .getConfiguration('prManager')
       .get<string>('chatMode', 'builtin');
     if (mode === 'builtin') {
-      conversation.addContext(label, contentText);
+      conversation.addContext(label, contentText, target);
     } else if (mode === 'claude-code-terminal') {
       void claudeCode.addContext(label, contentText);
     } else {

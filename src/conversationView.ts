@@ -125,7 +125,14 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** Adds a comment/review to the chat's context and reveals the panel. */
-  addContext(label: string, content: string): void {
+  addContext(label: string, content: string, target?: { pr: PullRequest; thread: Thread }): void {
+    // Remember the most recent review thread as the reply target.
+    if (target && target.thread.kind === 'review') {
+      this.pr = target.pr;
+      this.thread = target.thread;
+    } else if (target) {
+      this.pr = target.pr;
+    }
     if (this.contextItems.some((c) => c.content === content)) {
       vscode.window.setStatusBarMessage('Already in Claude context', 2000);
       this.view?.show?.(true);
@@ -495,11 +502,20 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async postReply(text: string): Promise<void> {
-    if (!this.pr || !this.thread || !this.view) return;
+    if (!this.view) return;
+    if (!this.pr) {
+      vscode.window.showWarningMessage('No pull request selected to reply to.');
+      return;
+    }
     try {
-      const comment = await this.client.reply(this.pr.number, this.thread, text);
-      this.thread.comments.push(comment);
-      this.pushThread();
+      if (this.thread && this.thread.kind === 'review') {
+        const comment = await this.client.reply(this.pr.number, this.thread, text);
+        this.thread.comments.push(comment);
+        this.pushThread();
+      } else {
+        // No review thread target — post as a general PR comment.
+        await this.client.addIssueComment(this.pr.number, text);
+      }
       this.view.webview.postMessage({ command: 'replyPosted' });
       vscode.window.showInformationMessage(`Reply posted to PR #${this.pr.number}.`);
       // Pull the latest PR data into the center panel.
@@ -729,6 +745,8 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
         if (!msg.items.length) {
           $('contextSection').style.display = 'none';
           chips.innerHTML = '';
+          $('replyBox').classList.remove('visible');
+          $('replyText').value = '';
           break;
         }
         $('contextSection').style.display = '';

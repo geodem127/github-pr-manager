@@ -32,8 +32,12 @@ const ICONS = {
 
 interface Callbacks {
 	onOpenThread: (pr: PullRequest, thread: Thread) => void;
-	/** Add a comment/review to the Claude chat's context. */
-	onAddContext: (label: string, content: string) => void;
+	/** Add a comment/review to the Claude chat's context (with an optional reply target). */
+	onAddContext: (
+		label: string,
+		content: string,
+		target?: { pr: PullRequest; thread: Thread }
+	) => void;
 	/** Check out the PR's head branch (handles a dirty working tree). */
 	onCheckout: (pr: PullRequest) => void | Promise<void>;
 }
@@ -121,7 +125,10 @@ export class PrDetailPanel {
 					const selected = comments.length > 0 ? comments : thread.comments;
 					const author = selected[0]?.user.login ?? "unknown";
 					const label = thread.kind === "review" ? `${thread.title} · @${author}` : `Comment by @${author}`;
-					this.callbacks.onAddContext(label, this.contextText(thread, selected));
+					this.callbacks.onAddContext(label, this.contextText(thread, selected), {
+						pr: this.pr,
+						thread,
+					});
 				}
 				break;
 			}
@@ -380,8 +387,15 @@ export class PrDetailPanel {
 	private discussionHtml(thread: Thread): string {
 		return thread.comments
 			.map((c) => {
-				const fstatus = c.reviewState === "APPROVED" ? "approved" : c.reviewState === "CHANGES_REQUESTED" ? "changes" : "comment";
+				const fstatus =
+					c.reviewState === "APPROVED" ? "approved"
+					: c.reviewState === "CHANGES_REQUESTED" ? "changes"
+					: c.reviewState ? "commented"
+					: "comment";
 				const verdict = c.reviewState === "APPROVED" ? '<span class="chip chip-green">approved</span>' : c.reviewState === "CHANGES_REQUESTED" ? '<span class="chip chip-red">changes requested</span>' : c.reviewState ? '<span class="chip chip-grey">reviewed</span>' : "";
+				// Only review verdicts (approve/changes/comment review) can be replied to;
+				// plain PR comments don't get a per-item reply box.
+				const reply = c.reviewState ? this.replyBoxHtml(thread.id) : "";
 				return `
       <div class="timeline-item filter-item" data-fauthor="${escapeHtml(c.user.login)}" data-fstatus="${fstatus}" data-ftype="comment">
         ${this.avatar(c.user, 32)}
@@ -396,7 +410,7 @@ export class PrDetailPanel {
           </div>
           <div class="card-body">
             <div class="bubble-body">${this.commentBody(c)}</div>
-            ${this.replyBoxHtml(thread.id)}
+            ${reply}
           </div>
         </div>
       </div>`;
@@ -723,9 +737,9 @@ export class PrDetailPanel {
            <select id="fAuthor" title="Filter by author"><option value="all">All authors</option>${authorOptions}</select>
            <select id="fStatus" title="Filter by status">
              <option value="all">All statuses</option>
-             <option value="comment">Comments</option>
              <option value="approved">Approved</option>
              <option value="changes">Changes requested</option>
+             <option value="commented">Commented</option>
              <option value="unresolved">Unresolved</option>
              <option value="resolved">Resolved</option>
              <option value="outdated">Outdated</option>
@@ -757,18 +771,8 @@ export class PrDetailPanel {
       </div>` +
 			discussionThreads.map((t) => this.discussionHtml(t)).join("") +
 			(reviewThreads.length
-				? `<div class="section-row">
-             <h2 class="section">Review conversations</h2>
-             <span class="spacer"></span>
-             <label class="filter-label" for="threadFilter">Status</label>
-             <select id="threadFilter" title="Filter conversations by status">
-               <option value="all">All</option>
-               <option value="unresolved">Unresolved</option>
-               <option value="resolved">Resolved</option>
-               <option value="outdated">Outdated</option>
-             </select>
-           </div>
-           <div id="threadFilterEmpty" class="muted small" style="display:none;margin:10px 0">No conversations match this filter.</div>` + reviewThreads.map((t) => this.reviewThreadHtml(t)).join("")
+				? `<h2 class="section">Review conversations</h2>` +
+					reviewThreads.map((t) => this.reviewThreadHtml(t)).join("")
 				: "") +
 			this.mergeBoxHtml(pr, detail) +
 			this.addCommentHtml();
