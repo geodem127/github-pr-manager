@@ -160,9 +160,9 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     this.pushContext();
   }
 
-  /** Shows Claude Code slash commands and inserts the chosen one into the chat box. */
+  /** Shows Claude slash commands (built-ins + discovered custom) and inserts the choice. */
   private async pickSlashCommand(): Promise<void> {
-    const commands: Array<{ label: string; description: string }> = [
+    const builtins: Array<{ label: string; description: string }> = [
       { label: '/help', description: 'List available commands' },
       { label: '/clear', description: 'Clear conversation history' },
       { label: '/compact', description: 'Summarize and compact the conversation' },
@@ -170,16 +170,71 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       { label: '/init', description: 'Initialize a CLAUDE.md for the project' },
       { label: '/cost', description: 'Show token usage and cost' },
       { label: '/model', description: 'Change the active model' },
-      { label: '/diff', description: 'Show the current diff' },
-      { label: '/commit', description: 'Create a git commit' },
-      { label: '/pr', description: 'Prepare a pull request' },
+      { label: '/memory', description: 'Edit CLAUDE.md memory' },
+      { label: '/agents', description: 'Manage subagents' },
+      { label: '/mcp', description: 'Manage MCP servers' },
     ];
-    const pick = await vscode.window.showQuickPick(commands, {
-      title: 'Claude slash commands',
-      placeHolder: 'Insert a slash command into the chat box',
-    });
+
+    const custom: Array<{ label: string; description: string }> = [];
+    const roots: Array<{ base: vscode.Uri; scope: string }> = [];
+    const ws = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (ws) roots.push({ base: vscode.Uri.joinPath(ws, '.claude', 'commands'), scope: 'project' });
+    const home = process.env.HOME || process.env.USERPROFILE;
+    if (home) {
+      roots.push({ base: vscode.Uri.joinPath(vscode.Uri.file(home), '.claude', 'commands'), scope: 'user' });
+    }
+    for (const { base, scope } of roots) {
+      await this.collectCommands(base, base, scope, custom);
+    }
+
+    const items = [
+      ...builtins.map((c) => ({ ...c, detail: 'built-in' })),
+      ...custom.map((c) => ({ ...c, detail: c.description ? `custom · ${c.description}` : 'custom' })),
+    ];
+    const seen = new Set<string>();
+    const unique = items.filter((i) => (seen.has(i.label) ? false : seen.add(i.label)));
+
+    const pick = await vscode.window.showQuickPick(
+      unique.map((i) => ({ label: i.label, description: i.detail })),
+      { title: 'Claude slash commands', placeHolder: 'Insert a slash command into the chat box' }
+    );
     if (pick) {
       void this.view?.webview.postMessage({ command: 'insertChat', text: pick.label + ' ' });
+    }
+  }
+
+  /** Recursively collects custom slash commands from a .claude/commands dir. */
+  private async collectCommands(
+    root: vscode.Uri,
+    dir: vscode.Uri,
+    scope: string,
+    out: Array<{ label: string; description: string }>
+  ): Promise<void> {
+    let entries: Array<[string, vscode.FileType]>;
+    try {
+      entries = await vscode.workspace.fs.readDirectory(dir);
+    } catch {
+      return; // dir doesn't exist
+    }
+    for (const [name, type] of entries) {
+      const child = vscode.Uri.joinPath(dir, name);
+      if (type === vscode.FileType.Directory) {
+        await this.collectCommands(root, child, scope, out);
+      } else if (name.endsWith('.md')) {
+        const relPath = child.path.slice(root.path.length + 1).replace(/\.md$/, '');
+        const cmd = '/' + relPath.replace(/\//g, ':'); // namespacing → /dir:name
+        let description = '';
+        try {
+          const text = Buffer.from(await vscode.workspace.fs.readFile(child)).toString('utf8');
+          const fm = text.match(/^---\s*[\s\S]*?\bdescription:\s*(.+)$/m);
+          description = (fm?.[1] ?? text.split('\n').find((l) => l.trim())?.replace(/^#+\s*/, '') ?? '')
+            .trim()
+            .slice(0, 80);
+        } catch {
+          /* ignore */
+        }
+        out.push({ label: cmd, description });
+      }
     }
   }
 
