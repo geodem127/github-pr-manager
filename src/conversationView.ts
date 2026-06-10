@@ -43,6 +43,9 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
         case 'ready':
           this.pushThread();
           this.pushContext();
+          void this.slashCommands().then((items) =>
+            this.view?.webview.postMessage({ command: 'slashList', items })
+          );
           break;
         case 'generateFix':
           await this.askClaude(
@@ -160,8 +163,15 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     this.pushContext();
   }
 
-  /** Shows Claude slash commands (built-ins + discovered custom) and inserts the choice. */
+  /** Re-enumerates slash commands and pushes them to the webview, then opens the popup. */
   private async pickSlashCommand(): Promise<void> {
+    const list = await this.slashCommands();
+    void this.view?.webview.postMessage({ command: 'slashList', items: list });
+    void this.view?.webview.postMessage({ command: 'openSlash' });
+  }
+
+  /** Built-in + discovered custom Claude slash commands. */
+  private async slashCommands(): Promise<Array<{ label: string; description: string }>> {
     const builtins: Array<{ label: string; description: string }> = [
       { label: '/help', description: 'List available commands' },
       { label: '/clear', description: 'Clear conversation history' },
@@ -187,20 +197,9 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       await this.collectCommands(base, base, scope, custom);
     }
 
-    const items = [
-      ...builtins.map((c) => ({ ...c, detail: 'built-in' })),
-      ...custom.map((c) => ({ ...c, detail: c.description ? `custom · ${c.description}` : 'custom' })),
-    ];
+    const items = [...builtins, ...custom];
     const seen = new Set<string>();
-    const unique = items.filter((i) => (seen.has(i.label) ? false : seen.add(i.label)));
-
-    const pick = await vscode.window.showQuickPick(
-      unique.map((i) => ({ label: i.label, description: i.detail })),
-      { title: 'Claude slash commands', placeHolder: 'Insert a slash command into the chat box' }
-    );
-    if (pick) {
-      void this.view?.webview.postMessage({ command: 'insertChat', text: pick.label + ' ' });
-    }
+    return items.filter((i) => (seen.has(i.label) ? false : seen.add(i.label)));
   }
 
   /** Recursively collects custom slash commands from a .claude/commands dir. */
@@ -500,7 +499,27 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
   blockquote { border-left: 3px solid var(--border); margin: 4px 0; padding-left: 8px; color: var(--vscode-descriptionForeground); }
 
   /* chat box pinned at the bottom */
-  #chatSection { flex-shrink: 0; border-top: 1px solid var(--border); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); padding: 8px 12px 10px; }
+  #chatSection { flex-shrink: 0; border-top: 1px solid var(--border); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); padding: 8px 12px 10px; position: relative; }
+
+  /* slash command autocomplete popup */
+  #slashPopup { border: 1px solid var(--border); border-radius: 6px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); box-shadow: 0 -2px 10px rgba(0,0,0,0.28); max-height: 220px; overflow-y: auto; margin-bottom: 6px; }
+  .slash-item { display: flex; align-items: baseline; gap: 8px; padding: 5px 10px; cursor: pointer; font-size: 12px; }
+  .slash-item .scmd { font-family: var(--vscode-editor-font-family); color: var(--vscode-foreground); }
+  .slash-item .sdesc { color: var(--vscode-descriptionForeground); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .slash-item.active { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+  .slash-item.active .scmd, .slash-item.active .sdesc { color: var(--vscode-list-activeSelectionForeground); }
+  .slash-hint { padding: 4px 10px; font-size: 10px; color: var(--vscode-descriptionForeground); border-top: 1px solid var(--border); }
+
+  /* busy / typing animation */
+  .busy { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--vscode-descriptionForeground); margin: 6px 0; }
+  .busy .dots { display: inline-flex; gap: 3px; }
+  .busy .dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--vscode-charts-purple); display: inline-block; animation: blink 1.2s infinite both; }
+  .busy .dots i:nth-child(2) { animation-delay: 0.2s; }
+  .busy .dots i:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+  .stream { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .stream .caret { display: inline-block; width: 7px; background: var(--vscode-charts-purple); animation: caret 1s steps(1) infinite; }
+  @keyframes caret { 50% { opacity: 0; } }
 
   /* Claude context chips */
   .chat-toolbar { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
@@ -550,6 +569,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div id="chatSection">
+      <div id="slashPopup" style="display:none"></div>
       <textarea id="chatText" rows="3" placeholder="Ask Claude about this conversation… (Enter to send, Shift+Enter for newline)"></textarea>
       <div class="chat-toolbar">
         <button class="tool-btn" id="btnUpload" title="Upload a file or folder to Claude's context">
@@ -572,6 +592,9 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
   const $ = (id) => document.getElementById(id);
   let busy = false;
   let activityGroup = null;
+  let busyEl = null;
+  let streamEl = null;
+  let streamText = '';
 
   function setBusy(value) {
     busy = value;
@@ -658,10 +681,26 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
         append(u);
         activityGroup = document.createElement('div');
         append(activityGroup);
+        // Busy animation
+        busyEl = document.createElement('div');
+        busyEl.className = 'busy';
+        busyEl.innerHTML = '<span class="dots"><i></i><i></i><i></i></span><span>Claude is working…</span>';
+        append(busyEl);
+        // Live streaming output (actual Claude text)
+        streamEl = document.createElement('div');
+        streamEl.className = 'claude-response';
+        streamEl.innerHTML = '<span class="stream"></span><span class="caret">&nbsp;</span>';
+        streamText = '';
+        append(streamEl);
         break;
       }
       case 'claudeEvent': {
-        if (msg.kind === 'status' && activityGroup) {
+        if (msg.kind === 'text' && streamEl) {
+          streamText += msg.text;
+          streamEl.querySelector('.stream').textContent = streamText;
+          if (busyEl) busyEl.querySelector('span:last-child').textContent = 'Claude is responding…';
+          streamEl.scrollIntoView({ block: 'nearest' });
+        } else if (msg.kind === 'status' && activityGroup) {
           const d = document.createElement('div');
           d.className = 'activity';
           d.textContent = msg.text;
@@ -673,7 +712,10 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       case 'claudeDone': {
         setBusy(false);
         if (activityGroup) activityGroup.innerHTML = '';
-        const d = document.createElement('div');
+        if (busyEl) { busyEl.remove(); busyEl = null; }
+        // Finalize: replace the live stream element with rendered markdown.
+        const d = streamEl || document.createElement('div');
+        streamEl = null;
         d.className = 'claude-response';
         d.innerHTML = msg.html + (msg.editsHtml || '');
         if (msg.canApply) {
@@ -704,6 +746,9 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       }
       case 'claudeError': {
         setBusy(false);
+        if (busyEl) { busyEl.remove(); busyEl = null; }
+        if (streamEl && !streamText) { streamEl.remove(); }
+        streamEl = null;
         const d = document.createElement('div');
         d.className = 'error';
         d.textContent = msg.text;
@@ -735,6 +780,19 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
         $('replyBox').classList.remove('visible');
         break;
       }
+      case 'slashList': {
+        slashList = msg.items || [];
+        break;
+      }
+      case 'openSlash': {
+        const box = $('chatText');
+        if (!/(^|\\s)\\/[\\w:-]*$/.test(box.value)) {
+          box.value = (box.value ? box.value.replace(/\\s*$/, ' ') : '') + '/';
+        }
+        box.focus();
+        updateSlash();
+        break;
+      }
     }
   });
 
@@ -754,10 +812,77 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     const text = $('chatText').value;
     if (!text.trim() || busy) return;
     $('chatText').value = '';
+    closeSlash();
     vscode.postMessage({ command: 'chat', text });
   }
   $('btnSend').addEventListener('click', sendChat);
+
+  // ---- Slash command autocomplete ----
+  let slashList = [];
+  let slashMatches = [];
+  let slashActive = 0;
+  const popup = $('slashPopup');
+
+  // Returns the trailing "/token" being typed, or null.
+  function slashToken() {
+    const box = $('chatText');
+    if (box.selectionStart !== box.value.length) return null;
+    const m = box.value.match(/(?:^|\\s)(\\/[\\w:-]*)$/);
+    return m ? m[1] : null;
+  }
+
+  function renderSlash() {
+    if (!slashMatches.length) { closeSlash(); return; }
+    popup.innerHTML =
+      slashMatches.map((c, i) =>
+        '<div class="slash-item' + (i === slashActive ? ' active' : '') + '" data-i="' + i + '">' +
+        '<span class="scmd">' + c.label + '</span>' +
+        (c.description ? '<span class="sdesc">' + c.description.replace(/</g, '&lt;') + '</span>' : '') +
+        '</div>'
+      ).join('') +
+      '<div class="slash-hint">↑↓ navigate · Tab to select · Esc to dismiss</div>';
+    popup.style.display = '';
+    const active = popup.querySelector('.slash-item.active');
+    if (active) active.scrollIntoView({ block: 'nearest' });
+  }
+
+  function updateSlash() {
+    const token = slashToken();
+    if (token == null) { closeSlash(); return; }
+    const q = token.slice(1).toLowerCase();
+    slashMatches = slashList.filter((c) => c.label.slice(1).toLowerCase().startsWith(q));
+    slashActive = 0;
+    renderSlash();
+  }
+
+  function closeSlash() {
+    popup.style.display = 'none';
+    slashMatches = [];
+  }
+
+  function selectSlash(i) {
+    const choice = slashMatches[i];
+    if (!choice) return;
+    const box = $('chatText');
+    box.value = box.value.replace(/(\\/[\\w:-]*)$/, choice.label + ' ');
+    closeSlash();
+    box.focus();
+  }
+
+  popup.addEventListener('mousedown', (e) => {
+    const item = e.target.closest('.slash-item');
+    if (item) { e.preventDefault(); selectSlash(Number(item.dataset.i)); }
+  });
+
+  $('chatText').addEventListener('input', updateSlash);
   $('chatText').addEventListener('keydown', (e) => {
+    const open = popup.style.display !== 'none' && slashMatches.length;
+    if (open) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); slashActive = (slashActive + 1) % slashMatches.length; renderSlash(); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); slashActive = (slashActive - 1 + slashMatches.length) % slashMatches.length; renderSlash(); return; }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) { e.preventDefault(); selectSlash(slashActive); return; }
+      if (e.key === 'Escape') { e.preventDefault(); closeSlash(); return; }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendChat();
